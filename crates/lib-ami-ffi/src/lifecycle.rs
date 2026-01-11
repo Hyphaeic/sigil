@@ -59,7 +59,8 @@ struct InitFfiOutput {
 /// Raw FFI output from AMI_GetWave.
 struct GetWaveFfiOutput {
     return_code: i64,
-    params_out: usize,  // *mut c_char as usize
+    /// CRIT-FFI-001 FIX: Store as String (copied inside closure), not pointer
+    params_out_str: Option<String>,
     wave_buffer: Vec<f64>,
     clock_times: Vec<f64>,
 }
@@ -83,6 +84,10 @@ pub struct AmiSession {
 
     /// Number of GetWave calls made.
     getwave_count: u64,
+
+    /// CRIT-FFI-002 FIX: Counter for in-flight FFI operations.
+    /// Used to prevent close() while orphaned threads still use the handle.
+    pending_ops: Arc<AtomicUsize>,
 }
 
 impl AmiSession {
@@ -94,6 +99,7 @@ impl AmiSession {
             state: SessionState::Uninitialized,
             config: ExecutionConfig::default(),
             getwave_count: 0,
+            pending_ops: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -105,6 +111,7 @@ impl AmiSession {
             state: SessionState::Uninitialized,
             config,
             getwave_count: 0,
+            pending_ops: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -305,9 +312,13 @@ impl AmiSession {
                 )
             };
 
+            // CRIT-FFI-001 FIX: Read string immediately after FFI call, inside closure.
+            // Per IBIS 7.2 Section 10.2.3, vendor may reuse static buffer immediately.
+            let params_out_str = unsafe { read_c_string(params_out) };
+
             GetWaveFfiOutput {
                 return_code,
-                params_out: params_out as usize,
+                params_out_str,
                 wave_buffer,
                 clock_times,
             }
@@ -325,13 +336,10 @@ impl AmiSession {
         // Copy modified waveform back
         wave.samples = ffi_output.wave_buffer;
 
-        // Parse output parameters
-        let params_out = ffi_output.params_out as *mut c_char;
-        let output_params = unsafe {
-            read_c_string(params_out)
-                .and_then(|s| AmiParameters::from_ami_string(&s).ok())
-                .unwrap_or_default()
-        };
+        // Parse output parameters from already-copied string (CRIT-FFI-001 FIX)
+        let output_params = ffi_output.params_out_str
+            .and_then(|s| AmiParameters::from_ami_string(&s).ok())
+            .unwrap_or_default();
 
         Ok(AmiGetWaveResult {
             return_code: ffi_output.return_code,
@@ -344,6 +352,12 @@ impl AmiSession {
     ///
     /// This is called automatically on drop, but can be called explicitly
     /// for earlier resource release or error handling.
+    ///
+    /// # CRIT-FFI-002 Fix
+    ///
+    /// This method waits for any pending (orphaned) operations to complete
+    /// before calling AMI_Close, preventing the race condition where an
+    /// orphaned thread could still be using the handle.
     pub fn close(&mut self) -> AmiResult<()> {
         // Only close if initialized
         match self.state {
@@ -358,7 +372,23 @@ impl AmiSession {
             return Ok(());
         }
 
-        // Execute AMI_Close
+        // CRIT-FFI-002 FIX: Wait for pending operations before closing.
+        // This prevents calling AMI_Close while orphaned threads still use the handle.
+        let max_wait = self.config.timeout * 2; // Wait up to 2x normal timeout
+        let start = std::time::Instant::now();
+
+        while self.pending_ops.load(Ordering::SeqCst) > 0 {
+            if start.elapsed() > max_wait {
+                tracing::warn!(
+                    pending_ops = self.pending_ops.load(Ordering::SeqCst),
+                    "Closing session with pending operations still in-flight"
+                );
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Now safe to close - no operations in flight (or we timed out waiting)
         let close_fn = self.library.close_fn();
         let result = self.execute_protected(move || {
             let handle = handle_usize as *mut c_void;
@@ -409,17 +439,25 @@ impl AmiSession {
         let timeout = self.config.timeout;
         let catch_panics = self.config.catch_panics;
 
+        // CRIT-FFI-002 FIX: Track pending operations for safe close()
+        let pending_ops = self.pending_ops.clone();
+        pending_ops.fetch_add(1, Ordering::SeqCst);
+
         // Use a channel for result communication
         let (tx, rx) = crossbeam::channel::bounded(1);
 
         // Spawn thread to execute function
-        // The thread will decrement the orphaned counter if it completes after timeout
+        // The thread will decrement counters when it completes
         std::thread::spawn(move || {
             let result = if catch_panics {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
             } else {
                 Ok(f())
             };
+
+            // CRIT-FFI-002 FIX: ALWAYS decrement pending ops when thread completes
+            pending_ops.fetch_sub(1, Ordering::SeqCst);
+
             // Try to send result. If the receiver is gone (timeout occurred),
             // decrement the orphaned thread counter since we're now completing.
             if tx.send(result).is_err() {
@@ -447,12 +485,20 @@ impl AmiSession {
                 ORPHANED_THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
                 tracing::warn!(
                     orphaned_threads = ORPHANED_THREAD_COUNT.load(Ordering::SeqCst),
+                    pending_ops = self.pending_ops.load(Ordering::SeqCst),
                     timeout_ms = timeout.as_millis(),
                     "AMI call timed out, thread orphaned"
                 );
                 Err(AmiError::Timeout(timeout))
             }
         }
+    }
+
+    /// Get the current count of pending operations for this session.
+    ///
+    /// This is useful for monitoring and diagnostics.
+    pub fn pending_operations(&self) -> usize {
+        self.pending_ops.load(Ordering::SeqCst)
     }
 }
 
