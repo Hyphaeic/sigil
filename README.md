@@ -1,4 +1,4 @@
-# SI-Kernel
+# sigil
 
 **High-Speed Signal Integrity Simulation Kernel for PCIe Gen 5/6**
 
