@@ -224,14 +224,38 @@ fn extract_parameters(expr: &SExpr, params: &mut AmiParameters) {
 // S-expression Parser (nom 8 compatible)
 // ============================================================================
 
+/// MED-005 FIX: Maximum nesting depth to prevent stack overflow on malformed input.
+const MAX_NESTING_DEPTH: usize = 100;
+
 fn parse_sexpr(input: &str) -> IResult<&str, SExpr> {
+    parse_sexpr_depth(input, 0)
+}
+
+fn parse_sexpr_depth(input: &str, depth: usize) -> IResult<&str, SExpr> {
+    // MED-005 FIX: Check depth before parsing to prevent stack overflow
+    if depth > MAX_NESTING_DEPTH {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        )));
+    }
     let (input, _) = multispace0(input)?;
-    alt((parse_list, parse_number, parse_string, parse_atom)).parse(input)
+    alt((
+        |i| parse_list_depth(i, depth),
+        parse_number,
+        parse_string,
+        parse_atom,
+    ))
+    .parse(input)
 }
 
 fn parse_list(input: &str) -> IResult<&str, SExpr> {
+    parse_list_depth(input, 0)
+}
+
+fn parse_list_depth(input: &str, depth: usize) -> IResult<&str, SExpr> {
     let (input, _) = char('(')(input)?;
-    let (input, items) = many0(preceded(multispace0, parse_sexpr)).parse(input)?;
+    let (input, items) = many0(preceded(multispace0, |i| parse_sexpr_depth(i, depth + 1))).parse(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')')(input)?;
     Ok((input, SExpr::List(items)))

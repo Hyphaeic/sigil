@@ -70,7 +70,9 @@ fn enforce_passivity_matrix(s: &mut Array2<Complex64>) -> DspResult<(bool, f64, 
         product.diag().iter().map(|c| c.re).fold(0.0, f64::max)
     };
 
-    let is_passive = max_eigenvalue <= 1.0 + 1e-10;
+    // Use a tolerance appropriate for floating-point arithmetic
+    // 1e-10 is too tight and causes false positives due to numerical errors
+    let is_passive = max_eigenvalue <= 1.0 + 1e-6;
 
     let scale = if !is_passive {
         let scale = 1.0 / max_eigenvalue.sqrt();
@@ -113,7 +115,7 @@ pub fn check_passivity(sparams: &SParameters) -> Vec<bool> {
         .iter()
         .map(|m| {
             // Simple check: all |S_ij| <= 1
-            m.iter().all(|c| c.norm() <= 1.0 + 1e-10)
+            m.iter().all(|c| c.norm() <= 1.0 + 1e-6)
         })
         .collect()
 }

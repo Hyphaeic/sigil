@@ -14,9 +14,17 @@ use lib_types::ami::{AmiConfig, AmiGetWaveResult, AmiInitResult, AmiParameters};
 use lib_types::waveform::Waveform;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Global counter for orphaned threads from timed-out FFI calls.
+/// When a timeout occurs, the spawned thread continues running but we can't cancel it.
+/// This counter tracks how many such threads exist to prevent resource exhaustion.
+static ORPHANED_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Maximum number of orphaned threads allowed before refusing new operations.
+const MAX_ORPHANED_THREADS: usize = 10;
 
 pub use lib_types::ami::SessionState;
 
@@ -188,11 +196,30 @@ impl AmiSession {
         let handle = ffi_output.handle as *mut c_void;
         let msg = ffi_output.msg as *mut c_char;
 
+        // CRIT-003 FIX: Read each C string exactly once immediately after FFI call.
+        // The vendor may free memory at any time, so we must copy strings immediately.
+        let message = unsafe { read_c_string(msg) };
+        let output_params_str = unsafe { read_c_string(params_out) };
+
         // Check return code
         if ffi_output.return_code != 0 {
-            let message = unsafe { read_c_string(msg).unwrap_or_default() };
+            // MED-007 FIX: Cleanup any handle returned by the model even on failure
+            // Some vendors return handles even on init failure - we must close them
+            if !handle.is_null() {
+                tracing::debug!("Cleaning up handle after init failure");
+                let close_fn = self.library.close_fn();
+                let handle_usize = handle as usize;
+                // Best-effort close, ignore errors since we're already failing
+                let _ = self.execute_protected(move || {
+                    let h = handle_usize as *mut c_void;
+                    unsafe { close_fn(h) }
+                });
+            }
             self.state = SessionState::Faulted;
-            return Err(AmiError::init_failed(ffi_output.return_code, message));
+            return Err(AmiError::init_failed(
+                ffi_output.return_code,
+                message.unwrap_or_default(),
+            ));
         }
 
         // Store handle and update state
@@ -205,15 +232,10 @@ impl AmiSession {
             impulse.samples = ffi_output.impulse_buffer;
         }
 
-        // Parse output parameters
-        let output_params = unsafe {
-            read_c_string(params_out)
-                .and_then(|s| AmiParameters::from_ami_string(&s).ok())
-                .unwrap_or_default()
-        };
-
-        // Read message
-        let message = unsafe { read_c_string(msg) };
+        // Parse output parameters from the already-read string
+        let output_params = output_params_str
+            .and_then(|s| AmiParameters::from_ami_string(&s).ok())
+            .unwrap_or_default();
 
         tracing::debug!(
             return_code = ffi_output.return_code,
@@ -358,11 +380,32 @@ impl AmiSession {
     }
 
     /// Execute a function with timeout and panic protection.
+    ///
+    /// # Thread Safety
+    ///
+    /// This function spawns a thread to execute the FFI call. If the call times out,
+    /// the thread becomes "orphaned" - it continues running but we can no longer
+    /// communicate with it. We track these orphaned threads globally and refuse
+    /// new operations if too many accumulate.
+    ///
+    /// Note: `AmiSession` requires `&mut self` for all operations, which provides
+    /// compile-time exclusivity - only one thread can call methods on a session
+    /// at a time. This prevents the race condition that could occur with concurrent
+    /// access to the session handle.
     fn execute_protected<F, R>(&self, f: F) -> AmiResult<R>
     where
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
+        // Check for too many orphaned threads before spawning a new one
+        let orphaned_count = ORPHANED_THREAD_COUNT.load(Ordering::SeqCst);
+        if orphaned_count >= MAX_ORPHANED_THREADS {
+            return Err(AmiError::TooManyOrphanedThreads {
+                count: orphaned_count,
+                max: MAX_ORPHANED_THREADS,
+            });
+        }
+
         let timeout = self.config.timeout;
         let catch_panics = self.config.catch_panics;
 
@@ -370,13 +413,19 @@ impl AmiSession {
         let (tx, rx) = crossbeam::channel::bounded(1);
 
         // Spawn thread to execute function
+        // The thread will decrement the orphaned counter if it completes after timeout
         std::thread::spawn(move || {
             let result = if catch_panics {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
             } else {
                 Ok(f())
             };
-            let _ = tx.send(result);
+            // Try to send result. If the receiver is gone (timeout occurred),
+            // decrement the orphaned thread counter since we're now completing.
+            if tx.send(result).is_err() {
+                // Receiver dropped = timeout occurred, but we're done now
+                ORPHANED_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
+            }
         });
 
         // Wait for result with timeout
@@ -392,9 +441,26 @@ impl AmiSession {
                 };
                 Err(AmiError::ModelPanicked(message))
             }
-            Err(_) => Err(AmiError::Timeout(timeout)),
+            Err(_) => {
+                // Timeout occurred - increment orphaned thread counter
+                // The thread is still running and will decrement when it completes
+                ORPHANED_THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
+                tracing::warn!(
+                    orphaned_threads = ORPHANED_THREAD_COUNT.load(Ordering::SeqCst),
+                    timeout_ms = timeout.as_millis(),
+                    "AMI call timed out, thread orphaned"
+                );
+                Err(AmiError::Timeout(timeout))
+            }
         }
     }
+}
+
+/// Get the current count of orphaned threads.
+///
+/// This is useful for monitoring and diagnostics.
+pub fn orphaned_thread_count() -> usize {
+    ORPHANED_THREAD_COUNT.load(Ordering::SeqCst)
 }
 
 impl Drop for AmiSession {

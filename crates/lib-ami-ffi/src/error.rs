@@ -65,6 +65,10 @@ pub enum AmiError {
     /// Back-channel communication error.
     #[error("Back-channel error: {0}")]
     BackChannelError(String),
+
+    /// Too many orphaned threads from previous timeouts.
+    #[error("Too many orphaned threads ({count}), max allowed is {max}")]
+    TooManyOrphanedThreads { count: usize, max: usize },
 }
 
 impl AmiError {

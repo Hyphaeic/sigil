@@ -112,10 +112,14 @@ fn parse_touchstone_inner(input: &str) -> IResult<&str, TouchstoneFile> {
     let (input, _) = many0(comment_or_blank_line).parse(input)?;
 
     // Determine number of ports from data
-    let num_ports = infer_ports_from_data(&data_lines);
+    let num_ports = infer_ports_from_data(&data_lines).map_err(|_| {
+        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })?;
 
     // Build S-parameters
-    let sparams = build_sparams(&options, &data_lines, num_ports);
+    let sparams = build_sparams(&options, &data_lines, num_ports).map_err(|_| {
+        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })?;
 
     Ok((
         input,
@@ -251,57 +255,120 @@ fn parse_data_line(input: &str) -> IResult<&str, Vec<f64>> {
     Ok((input, values))
 }
 
-fn infer_ports_from_data(data_lines: &[Vec<f64>]) -> usize {
-    // For N ports, each frequency has N^2 S-parameters (2 values each for complex)
-    // Plus 1 frequency value = 1 + 2*N^2 values per frequency point
-
-    // Count values in first complete frequency point
+/// Infer number of ports from data.
+///
+/// Returns Ok(num_ports) if successfully inferred, Err if ambiguous or unsupported.
+///
+/// # Port count determination
+///
+/// For N ports, each frequency has N² S-parameters (2 values each for complex)
+/// Plus 1 frequency value = 1 + 2*N² values per frequency point:
+/// - 1-port: 1 + 2*1 = 3 values
+/// - 2-port: 1 + 2*4 = 9 values
+/// - 3-port: 1 + 2*9 = 19 values
+/// - 4-port: 1 + 2*16 = 33 values
+/// - 6-port: 1 + 2*36 = 73 values
+/// - 8-port: 1 + 2*64 = 129 values
+fn infer_ports_from_data(data_lines: &[Vec<f64>]) -> Result<usize, ParseError> {
     if data_lines.is_empty() {
-        return 2;
+        return Err(ParseError::InvalidFormat {
+            format: "Touchstone".to_string(),
+            message: "No data lines found in file".to_string(),
+        });
     }
 
-    // For 2-port: 1 + 2*4 = 9 values
-    // For 4-port: 1 + 2*16 = 33 values (may span multiple lines)
+    // Count total values across all lines
+    let total_values: usize = data_lines.iter().map(|line| line.len()).sum();
 
-    // Simple heuristic: check first line
-    let first_line_len = data_lines[0].len();
+    // Try to determine port count from total values
+    // We need total_values to be a multiple of (1 + 2*N²)
 
-    match first_line_len {
-        3 => 1,   // 1-port: freq, S11_r, S11_i (or mag/ang)
-        9 => 2,   // 2-port: freq, S11, S21, S12, S22 (4 params * 2 values + 1 freq)
-        5 => 2,   // Sometimes 2-port on multiple lines
-        _ => {
-            // Try to figure out from multiple lines
-            // For now, assume 2-port if unclear
-            2
+    for num_ports in [1, 2, 3, 4, 6, 8] {
+        let values_per_freq = 1 + 2 * num_ports * num_ports;
+        if total_values % values_per_freq == 0 && total_values >= values_per_freq {
+            // Verify by checking first line makes sense
+            let first_line_len = data_lines[0].len();
+
+            // For 1-port and 2-port, all data usually fits on one line
+            if num_ports == 1 && first_line_len >= 3 {
+                return Ok(1);
+            }
+            if num_ports == 2 && first_line_len >= 5 {
+                return Ok(2);
+            }
+            // For larger ports, data spans multiple lines
+            if num_ports >= 3 {
+                return Ok(num_ports);
+            }
         }
+    }
+
+    // If we can't determine, check first line as fallback
+    let first_line_len = data_lines[0].len();
+    match first_line_len {
+        3 => Ok(1),
+        9 => Ok(2),
+        5 => Ok(2), // Sometimes 2-port on multiple lines
+        n => Err(ParseError::InvalidFormat {
+            format: "Touchstone".to_string(),
+            message: format!(
+                "Cannot infer port count from {} values per line. \
+                Expected 3 (1-port), 9 (2-port), or multi-line format for larger ports.",
+                n
+            ),
+        }),
     }
 }
 
-fn build_sparams(options: &OptionsLine, data_lines: &[Vec<f64>], num_ports: usize) -> SParameters {
+fn build_sparams(
+    options: &OptionsLine,
+    data_lines: &[Vec<f64>],
+    num_ports: usize,
+) -> Result<SParameters, ParseError> {
     let mut sparams = SParameters::new(num_ports, options.z0);
 
     // Flatten all data
     let all_values: Vec<f64> = data_lines.iter().flatten().copied().collect();
 
-    // Values per frequency point
+    // Values per frequency point: 1 (freq) + 2 * N² (complex S-params)
     let values_per_freq = 1 + 2 * num_ports * num_ports;
 
-    // Parse frequency points
-    let mut idx = 0;
-    while idx + values_per_freq <= all_values.len() {
-        let freq = Hertz(all_values[idx] * options.freq_mult);
-        idx += 1;
+    if all_values.len() < values_per_freq {
+        return Err(ParseError::InvalidFormat {
+            format: "Touchstone".to_string(),
+            message: format!(
+                "Insufficient data: need at least {} values for {}-port, got {}",
+                values_per_freq, num_ports, all_values.len()
+            ),
+        });
+    }
+
+    // Parse frequency points using chunks for safety
+    for chunk in all_values.chunks_exact(values_per_freq) {
+        let freq = Hertz(chunk[0] * options.freq_mult);
+        let params = &chunk[1..];
+
+        // Verify we have the right number of parameters
+        if params.len() != 2 * num_ports * num_ports {
+            return Err(ParseError::InvalidFormat {
+                format: "Touchstone".to_string(),
+                message: format!(
+                    "Expected {} S-parameter values, got {}",
+                    2 * num_ports * num_ports,
+                    params.len()
+                ),
+            });
+        }
 
         let mut matrix = Array2::zeros((num_ports, num_ports));
 
-        // S-parameters are stored in row-major order for 2-port
-        // For larger: may be different
+        // S-parameters are stored in row-major order
+        let mut param_idx = 0;
         for row in 0..num_ports {
             for col in 0..num_ports {
-                let val1 = all_values[idx];
-                let val2 = all_values[idx + 1];
-                idx += 2;
+                let val1 = params[param_idx];
+                let val2 = params[param_idx + 1];
+                param_idx += 2;
 
                 matrix[[row, col]] = options.format.to_complex(val1, val2);
             }
@@ -310,7 +377,16 @@ fn build_sparams(options: &OptionsLine, data_lines: &[Vec<f64>], num_ports: usiz
         sparams.add_point(freq, matrix);
     }
 
-    sparams
+    // Warn if there are leftover values (incomplete frequency point)
+    let remainder = all_values.len() % values_per_freq;
+    if remainder != 0 {
+        tracing::warn!(
+            "Incomplete frequency point: {} extra values ignored",
+            remainder
+        );
+    }
+
+    Ok(sparams)
 }
 
 #[cfg(test)]

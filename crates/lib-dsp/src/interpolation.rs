@@ -3,6 +3,24 @@
 use crate::error::{DspError, DspResult};
 use lib_types::units::Hertz;
 use num_complex::Complex64;
+use std::f64::consts::PI;
+
+/// Wrap a phase value to the range [-π, π].
+///
+/// Handles arbitrary phase values, not just those in [-2π, 2π].
+#[inline]
+fn wrap_phase(mut phase: f64) -> f64 {
+    // Use modular arithmetic for efficiency
+    // This handles large phase differences correctly
+    let tau = 2.0 * PI;
+    phase = phase % tau;
+    if phase > PI {
+        phase -= tau;
+    } else if phase < -PI {
+        phase += tau;
+    }
+    phase
+}
 
 /// Interpolate S-parameters to a uniform frequency grid.
 pub fn interpolate_linear(
@@ -67,13 +85,9 @@ fn interpolate_single(freqs: &[Hertz], values: &[Complex64], target: f64) -> Com
     let phase0 = v0.arg();
     let phase1 = v1.arg();
 
-    // Handle phase wrapping
-    let mut phase_diff = phase1 - phase0;
-    if phase_diff > std::f64::consts::PI {
-        phase_diff -= 2.0 * std::f64::consts::PI;
-    } else if phase_diff < -std::f64::consts::PI {
-        phase_diff += 2.0 * std::f64::consts::PI;
-    }
+    // Handle phase wrapping using modular arithmetic
+    // This correctly handles arbitrary phase differences, not just [-2π, 2π]
+    let phase_diff = wrap_phase(phase1 - phase0);
 
     let mag = mag0 + frac * (mag1 - mag0);
     let phase = phase0 + frac * phase_diff;

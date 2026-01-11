@@ -362,14 +362,64 @@ impl TxPreset {
         Self::PCIE_GEN5_PRESETS.get(preset as usize).copied()
     }
 
-    /// Convert to normalized tap values.
-    pub fn to_normalized_taps(&self) -> (f64, f64, f64) {
+    /// Convert to tap values normalized by absolute sum.
+    ///
+    /// Returns taps where the sum of absolute values equals 1.0.
+    /// This is useful when the taps represent a constraint on maximum swing.
+    ///
+    /// For preset P5 (-2, 22, 0):
+    /// - Sum of absolutes = 24
+    /// - Returns (-0.0833, 0.917, 0.0)
+    /// - |pre| + |main| + |post| = 1.0
+    pub fn to_normalized_taps_absolute(&self) -> (f64, f64, f64) {
         let sum = (self.pre_cursor.abs() + self.main_cursor.abs() + self.post_cursor.abs()) as f64;
+        if sum == 0.0 {
+            return (0.0, 0.0, 0.0);
+        }
         (
             self.pre_cursor as f64 / sum,
             self.main_cursor as f64 / sum,
             self.post_cursor as f64 / sum,
         )
+    }
+
+    /// Convert to tap values normalized by signed sum (DC gain = 1).
+    ///
+    /// Returns taps where the algebraic sum equals 1.0.
+    /// This is useful when the taps represent FIR filter coefficients
+    /// and you want unity DC gain.
+    ///
+    /// For preset P5 (-2, 22, 0):
+    /// - Signed sum = 20
+    /// - Returns (-0.1, 1.1, 0.0)
+    /// - pre + main + post = 1.0
+    pub fn to_normalized_taps_signed(&self) -> Option<(f64, f64, f64)> {
+        let sum = (self.pre_cursor + self.main_cursor + self.post_cursor) as f64;
+        if sum == 0.0 {
+            return None; // Cannot normalize if sum is zero
+        }
+        Some((
+            self.pre_cursor as f64 / sum,
+            self.main_cursor as f64 / sum,
+            self.post_cursor as f64 / sum,
+        ))
+    }
+
+    /// Convert to raw tap values as f64.
+    ///
+    /// Returns the tap values without any normalization.
+    pub fn to_raw_taps(&self) -> (f64, f64, f64) {
+        (
+            self.pre_cursor as f64,
+            self.main_cursor as f64,
+            self.post_cursor as f64,
+        )
+    }
+
+    /// Legacy method - alias for to_normalized_taps_absolute.
+    #[deprecated(since = "0.2.0", note = "Use to_normalized_taps_absolute() instead")]
+    pub fn to_normalized_taps(&self) -> (f64, f64, f64) {
+        self.to_normalized_taps_absolute()
     }
 }
 
@@ -447,12 +497,21 @@ mod tests {
     }
 
     #[test]
-    fn test_tx_preset_normalization() {
+    fn test_tx_preset_normalization_absolute() {
         let p5 = TxPreset::get(5).unwrap();
-        let (pre, main, post) = p5.to_normalized_taps();
+        let (pre, main, post) = p5.to_normalized_taps_absolute();
 
         // Sum of absolute values should be 1
         assert!((pre.abs() + main.abs() + post.abs() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_tx_preset_normalization_signed() {
+        let p5 = TxPreset::get(5).unwrap();
+        let (pre, main, post) = p5.to_normalized_taps_signed().unwrap();
+
+        // Signed sum should be 1
+        assert!((pre + main + post - 1.0).abs() < 1e-10);
     }
 
     #[test]

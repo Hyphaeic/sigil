@@ -28,12 +28,27 @@ pub fn enforce_causality(h: &[Complex64]) -> DspResult<Vec<Complex64>> {
         .collect();
     engine.ifft_inplace(&mut cepstrum)?;
 
-    // Apply causal window: keep n=0, double n=1..N/2-1, zero n=N/2..N-1
-    cepstrum[0].im = 0.0;
+    // Apply causal window for minimum-phase reconstruction:
+    // - DC (index 0): keep real, zero imaginary
+    // - Positive frequencies (1 to N/2-1): double
+    // - Nyquist (index N/2, if N is even): keep real, zero imaginary
+    // - Negative frequencies (N/2+1 to N-1): zero
+
+    // DC component: keep real, zero imaginary
+    cepstrum[0] = Complex64::new(cepstrum[0].re, 0.0);
+
+    // Positive frequencies: double
     for i in 1..n / 2 {
         cepstrum[i] *= 2.0;
     }
-    for i in n / 2..n {
+
+    // Nyquist (if N is even): keep real, zero imaginary
+    if n % 2 == 0 && n > 1 {
+        cepstrum[n / 2] = Complex64::new(cepstrum[n / 2].re, 0.0);
+    }
+
+    // Negative frequencies: zero
+    for i in (n / 2 + 1)..n {
         cepstrum[i] = Complex64::new(0.0, 0.0);
     }
 

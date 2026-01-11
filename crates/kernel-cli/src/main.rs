@@ -8,7 +8,7 @@ mod output;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[derive(Parser)]
@@ -148,7 +148,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_simulation(config_path: &PathBuf, output_dir: &PathBuf, format: OutputFormat) -> Result<()> {
+// LOW-002 FIX: Use &Path instead of &PathBuf
+fn run_simulation(config_path: &Path, output_dir: &Path, format: OutputFormat) -> Result<()> {
     tracing::info!("Loading configuration from {:?}", config_path);
 
     let config = config::load_config(config_path)?;
@@ -167,7 +168,7 @@ fn run_simulation(config_path: &PathBuf, output_dir: &PathBuf, format: OutputFor
     Ok(())
 }
 
-fn parse_ibis(file: &PathBuf) -> Result<()> {
+fn parse_ibis(file: &Path) -> Result<()> {
     tracing::info!("Parsing IBIS file: {:?}", file);
 
     let content = std::fs::read_to_string(file)?;
@@ -195,7 +196,12 @@ fn parse_ibis(file: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn parse_touchstone(file: &PathBuf, to_pulse: bool, bit_time_ps: f64) -> Result<()> {
+fn parse_touchstone(file: &Path, to_pulse: bool, bit_time_ps: f64) -> Result<()> {
+    // MED-009 FIX: Validate CLI parameters
+    if to_pulse && bit_time_ps <= 0.0 {
+        anyhow::bail!("bit_time_ps must be > 0 when generating pulse response");
+    }
+
     tracing::info!("Parsing Touchstone file: {:?}", file);
 
     let content = std::fs::read_to_string(file)?;
@@ -244,7 +250,7 @@ fn parse_touchstone(file: &PathBuf, to_pulse: bool, bit_time_ps: f64) -> Result<
     Ok(())
 }
 
-fn parse_ami(file: &PathBuf) -> Result<()> {
+fn parse_ami(file: &Path) -> Result<()> {
     tracing::info!("Parsing AMI file: {:?}", file);
 
     let content = std::fs::read_to_string(file)?;
@@ -267,6 +273,17 @@ fn parse_ami(file: &PathBuf) -> Result<()> {
 fn generate_prbs(order: u8, bits: u64, samples_per_bit: usize, output: Option<PathBuf>) -> Result<()> {
     use lib_dsp::prbs::PrbsGenerator;
     use lib_types::units::Seconds;
+
+    // MED-009 FIX: Validate CLI parameters
+    if ![7, 9, 11, 15, 23, 31].contains(&order) {
+        anyhow::bail!("Invalid PRBS order: {}. Must be 7, 9, 11, 15, 23, or 31", order);
+    }
+    if samples_per_bit == 0 {
+        anyhow::bail!("samples_per_bit must be > 0");
+    }
+    if bits == 0 {
+        anyhow::bail!("bits must be > 0");
+    }
 
     tracing::info!("Generating PRBS-{} with {} bits", order, bits);
 
@@ -292,7 +309,12 @@ fn generate_prbs(order: u8, bits: u64, samples_per_bit: usize, output: Option<Pa
     Ok(())
 }
 
-fn compute_eye(waveform_path: &PathBuf, samples_per_ui: usize, output: Option<PathBuf>) -> Result<()> {
+fn compute_eye(waveform_path: &Path, samples_per_ui: usize, output: Option<PathBuf>) -> Result<()> {
+    // MED-009 FIX: Validate CLI parameters
+    if samples_per_ui == 0 {
+        anyhow::bail!("samples_per_ui must be > 0");
+    }
+
     tracing::info!("Computing eye diagram from {:?}", waveform_path);
 
     // For now, just print a placeholder

@@ -156,10 +156,11 @@ impl Orchestrator {
         tracing::debug!("Convolution complete: {} output samples", output_waveform.len());
 
         // Compute eye diagram
+        // MED-006 FIX: Use configurable parameters instead of hard-coded values
         let eye_analyzer = EyeAnalyzer::new(
             samples_per_ui,
-            256, // voltage bins
-            (-1.5, 1.5), // voltage range
+            self.config.simulation.voltage_bins,
+            (self.config.simulation.voltage_min, self.config.simulation.voltage_max),
         );
 
         let eye_diagram = eye_analyzer.analyze(&output_waveform);

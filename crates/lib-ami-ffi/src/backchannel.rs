@@ -7,7 +7,25 @@
 use lib_types::ami::{AmiValue, BackChannelMessage};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+/// Helper trait to recover from poisoned mutexes.
+///
+/// If a thread panicked while holding a mutex, the mutex becomes "poisoned".
+/// For the back-channel bus, we recover by accessing the data anyway, since
+/// it's better to continue with potentially inconsistent data than to panic.
+trait RecoverMutex<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> RecoverMutex<T> for Mutex<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!("Mutex was poisoned, recovering data");
+            poisoned.into_inner()
+        })
+    }
+}
 
 pub use lib_types::ami::TrainingState;
 
@@ -67,54 +85,54 @@ impl BackChannelBus {
 
     /// Send a message from Rx to Tx.
     pub fn rx_send(&self, msg: BackChannelMessage) {
-        self.rx_to_tx.lock().unwrap().push_back(msg);
+        self.rx_to_tx.lock_recover().push_back(msg);
     }
 
     /// Receive a message at Tx (from Rx).
     pub fn tx_receive(&self) -> Option<BackChannelMessage> {
-        self.rx_to_tx.lock().unwrap().pop_front()
+        self.rx_to_tx.lock_recover().pop_front()
     }
 
     /// Peek at the next message for Tx without removing it.
     pub fn tx_peek(&self) -> Option<BackChannelMessage> {
-        self.rx_to_tx.lock().unwrap().front().cloned()
+        self.rx_to_tx.lock_recover().front().cloned()
     }
 
     /// Send a message from Tx to Rx.
     pub fn tx_send(&self, msg: BackChannelMessage) {
-        self.tx_to_rx.lock().unwrap().push_back(msg);
+        self.tx_to_rx.lock_recover().push_back(msg);
     }
 
     /// Receive a message at Rx (from Tx).
     pub fn rx_receive(&self) -> Option<BackChannelMessage> {
-        self.tx_to_rx.lock().unwrap().pop_front()
+        self.tx_to_rx.lock_recover().pop_front()
     }
 
     /// Peek at the next message for Rx without removing it.
     pub fn rx_peek(&self) -> Option<BackChannelMessage> {
-        self.tx_to_rx.lock().unwrap().front().cloned()
+        self.tx_to_rx.lock_recover().front().cloned()
     }
 
     /// Check if there are pending messages for Tx.
     pub fn has_tx_messages(&self) -> bool {
-        !self.rx_to_tx.lock().unwrap().is_empty()
+        !self.rx_to_tx.lock_recover().is_empty()
     }
 
     /// Check if there are pending messages for Rx.
     pub fn has_rx_messages(&self) -> bool {
-        !self.tx_to_rx.lock().unwrap().is_empty()
+        !self.tx_to_rx.lock_recover().is_empty()
     }
 
     /// Clear all pending messages.
     pub fn clear(&self) {
-        self.rx_to_tx.lock().unwrap().clear();
-        self.tx_to_rx.lock().unwrap().clear();
+        self.rx_to_tx.lock_recover().clear();
+        self.tx_to_rx.lock_recover().clear();
     }
 
     /// Record a figure of merit observation.
     pub fn record_fom(&self, fom: f64, preset: u8) {
-        let mut best = self.best_fom.lock().unwrap();
-        let mut best_p = self.best_preset.lock().unwrap();
+        let mut best = self.best_fom.lock_recover();
+        let mut best_p = self.best_preset.lock_recover();
 
         if best.is_none() || fom > best.unwrap() {
             *best = Some(fom);
@@ -124,8 +142,8 @@ impl BackChannelBus {
 
     /// Get the best figure of merit and associated preset.
     pub fn best_result(&self) -> Option<(f64, u8)> {
-        let fom = *self.best_fom.lock().unwrap();
-        let preset = *self.best_preset.lock().unwrap();
+        let fom = *self.best_fom.lock_recover();
+        let preset = *self.best_preset.lock_recover();
         fom.zip(preset)
     }
 
@@ -133,8 +151,8 @@ impl BackChannelBus {
     pub fn reset(&self) {
         self.clear();
         self.set_state(TrainingState::Idle);
-        *self.best_fom.lock().unwrap() = None;
-        *self.best_preset.lock().unwrap() = None;
+        *self.best_fom.lock_recover() = None;
+        *self.best_preset.lock_recover() = None;
     }
 }
 

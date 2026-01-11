@@ -37,3 +37,4 @@ tarpaulin-report.html
 # Temporary files
 *.tmp
 *.bak
+docs/ISSUES.md

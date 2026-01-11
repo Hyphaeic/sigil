@@ -124,12 +124,28 @@ pub struct SimulationParams {
     /// Maximum training iterations.
     #[serde(default = "default_max_training")]
     pub max_training_iterations: usize,
+
+    // MED-006 FIX: Make eye diagram parameters configurable instead of hard-coded
+    /// Number of voltage bins for eye diagram.
+    #[serde(default = "default_voltage_bins")]
+    pub voltage_bins: usize,
+
+    /// Minimum voltage for eye diagram range.
+    #[serde(default = "default_voltage_min")]
+    pub voltage_min: f64,
+
+    /// Maximum voltage for eye diagram range.
+    #[serde(default = "default_voltage_max")]
+    pub voltage_max: f64,
 }
 
 fn default_num_bits() -> u64 { 1_000_000 }
 fn default_prbs_order() -> u8 { 31 }
 fn default_samples_per_ui() -> usize { 64 }
 fn default_max_training() -> usize { 100 }
+fn default_voltage_bins() -> usize { 256 }
+fn default_voltage_min() -> f64 { -1.5 }
+fn default_voltage_max() -> f64 { 1.5 }
 
 impl Default for SimulationParams {
     fn default() -> Self {
@@ -140,6 +156,9 @@ impl Default for SimulationParams {
             samples_per_ui: default_samples_per_ui(),
             link_training: false,
             max_training_iterations: default_max_training(),
+            voltage_bins: default_voltage_bins(),
+            voltage_min: default_voltage_min(),
+            voltage_max: default_voltage_max(),
         }
     }
 }
@@ -207,6 +226,16 @@ fn validate_config(config: &SimulationConfig) -> Result<()> {
         );
     }
 
+    // Validate TX model files if specified
+    if let Some(ref tx) = config.tx {
+        validate_model_config(tx, "TX")?;
+    }
+
+    // Validate RX model files if specified
+    if let Some(ref rx) = config.rx {
+        validate_model_config(rx, "RX")?;
+    }
+
     // Validate port numbers
     if config.channel.input_port == 0 || config.channel.output_port == 0 {
         anyhow::bail!("Port numbers must be >= 1");
@@ -218,6 +247,30 @@ fn validate_config(config: &SimulationConfig) -> Result<()> {
             "Invalid PRBS order: {}. Must be 7, 9, 11, 15, 23, or 31",
             config.simulation.prbs_order
         );
+    }
+
+    Ok(())
+}
+
+/// Validate model configuration file paths.
+fn validate_model_config(model: &ModelConfig, label: &str) -> Result<()> {
+    // Check IBIS file exists
+    if !model.ibis.exists() {
+        anyhow::bail!("{} IBIS file not found: {:?}", label, model.ibis);
+    }
+
+    // Check AMI file exists if specified
+    if let Some(ref ami) = model.ami {
+        if !ami.exists() {
+            anyhow::bail!("{} AMI file not found: {:?}", label, ami);
+        }
+    }
+
+    // Check library file exists if specified
+    if let Some(ref library) = model.library {
+        if !library.exists() {
+            anyhow::bail!("{} library file not found: {:?}", label, library);
+        }
     }
 
     Ok(())

@@ -40,11 +40,40 @@ impl SParameters {
     }
 
     /// Add a frequency point with its S-matrix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the matrix dimensions don't match the number of ports.
     pub fn add_point(&mut self, freq: Hertz, matrix: SMatrix) {
-        debug_assert_eq!(matrix.nrows(), self.num_ports);
-        debug_assert_eq!(matrix.ncols(), self.num_ports);
+        assert_eq!(
+            matrix.nrows(),
+            self.num_ports,
+            "Matrix row count {} doesn't match port count {}",
+            matrix.nrows(),
+            self.num_ports
+        );
+        assert_eq!(
+            matrix.ncols(),
+            self.num_ports,
+            "Matrix column count {} doesn't match port count {}",
+            matrix.ncols(),
+            self.num_ports
+        );
         self.frequencies.push(freq);
         self.matrices.push(matrix);
+    }
+
+    /// Try to add a frequency point, returning an error if dimensions don't match.
+    pub fn try_add_point(&mut self, freq: Hertz, matrix: SMatrix) -> Result<(), &'static str> {
+        if matrix.nrows() != self.num_ports {
+            return Err("Matrix row count doesn't match port count");
+        }
+        if matrix.ncols() != self.num_ports {
+            return Err("Matrix column count doesn't match port count");
+        }
+        self.frequencies.push(freq);
+        self.matrices.push(matrix);
+        Ok(())
     }
 
     /// Number of frequency points.
@@ -229,17 +258,23 @@ impl MixedModeSParameters {
         let mut common_to_diff = SParameters::new(2, se.z0);
 
         for (freq, matrix) in se.frequencies.iter().zip(se.matrices.iter()) {
-            // Transformation matrix M
-            // Vd = (V+ - V-) / sqrt(2)
-            // Vc = (V+ + V-) / sqrt(2)
+            // Mixed-mode S-parameter transformation.
+            // The transformation from single-ended to differential/common mode uses
+            // the factor 0.5 (not 1/√2) for proper scaling.
+            //
+            // For a 4-port network with ports 1,3 as input pair and ports 2,4 as output pair:
+            // SDD = 0.5 * (S_pp - S_pn - S_np + S_nn)
+            // SCC = 0.5 * (S_pp + S_pn + S_np + S_nn)
+            //
+            // where p=positive, n=negative
 
-            let inv_sqrt2 = 1.0 / std::f64::consts::SQRT_2;
+            let scale = Complex64::new(0.5, 0.0);
 
             // SDD (differential-differential)
-            let sdd11 = inv_sqrt2 * (matrix[[0, 0]] - matrix[[0, 2]] - matrix[[2, 0]] + matrix[[2, 2]]);
-            let sdd12 = inv_sqrt2 * (matrix[[0, 1]] - matrix[[0, 3]] - matrix[[2, 1]] + matrix[[2, 3]]);
-            let sdd21 = inv_sqrt2 * (matrix[[1, 0]] - matrix[[1, 2]] - matrix[[3, 0]] + matrix[[3, 2]]);
-            let sdd22 = inv_sqrt2 * (matrix[[1, 1]] - matrix[[1, 3]] - matrix[[3, 1]] + matrix[[3, 3]]);
+            let sdd11 = scale * (matrix[[0, 0]] - matrix[[0, 2]] - matrix[[2, 0]] + matrix[[2, 2]]);
+            let sdd12 = scale * (matrix[[0, 1]] - matrix[[0, 3]] - matrix[[2, 1]] + matrix[[2, 3]]);
+            let sdd21 = scale * (matrix[[1, 0]] - matrix[[1, 2]] - matrix[[3, 0]] + matrix[[3, 2]]);
+            let sdd22 = scale * (matrix[[1, 1]] - matrix[[1, 3]] - matrix[[3, 1]] + matrix[[3, 3]]);
 
             let mut sdd = Array2::zeros((2, 2));
             sdd[[0, 0]] = sdd11;
@@ -249,10 +284,10 @@ impl MixedModeSParameters {
             differential.add_point(*freq, sdd);
 
             // SCC (common-common)
-            let scc11 = inv_sqrt2 * (matrix[[0, 0]] + matrix[[0, 2]] + matrix[[2, 0]] + matrix[[2, 2]]);
-            let scc12 = inv_sqrt2 * (matrix[[0, 1]] + matrix[[0, 3]] + matrix[[2, 1]] + matrix[[2, 3]]);
-            let scc21 = inv_sqrt2 * (matrix[[1, 0]] + matrix[[1, 2]] + matrix[[3, 0]] + matrix[[3, 2]]);
-            let scc22 = inv_sqrt2 * (matrix[[1, 1]] + matrix[[1, 3]] + matrix[[3, 1]] + matrix[[3, 3]]);
+            let scc11 = scale * (matrix[[0, 0]] + matrix[[0, 2]] + matrix[[2, 0]] + matrix[[2, 2]]);
+            let scc12 = scale * (matrix[[0, 1]] + matrix[[0, 3]] + matrix[[2, 1]] + matrix[[2, 3]]);
+            let scc21 = scale * (matrix[[1, 0]] + matrix[[1, 2]] + matrix[[3, 0]] + matrix[[3, 2]]);
+            let scc22 = scale * (matrix[[1, 1]] + matrix[[1, 3]] + matrix[[3, 1]] + matrix[[3, 3]]);
 
             let mut scc = Array2::zeros((2, 2));
             scc[[0, 0]] = scc11;

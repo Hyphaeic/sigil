@@ -44,8 +44,22 @@ impl Seconds {
     }
 
     /// Convert to frequency (reciprocal).
+    ///
+    /// Returns `None` if the time is zero (would cause division by zero).
     #[inline]
-    pub fn to_frequency(&self) -> Hertz {
+    pub fn to_frequency(&self) -> Option<Hertz> {
+        if self.0 == 0.0 {
+            None
+        } else {
+            Some(Hertz(1.0 / self.0))
+        }
+    }
+
+    /// Convert to frequency, returning infinity for zero time.
+    ///
+    /// Use this when you want a value even for zero time (e.g., for plotting).
+    #[inline]
+    pub fn to_frequency_unchecked(&self) -> Hertz {
         Hertz(1.0 / self.0)
     }
 }
@@ -118,8 +132,22 @@ impl Hertz {
     }
 
     /// Convert to period (reciprocal).
+    ///
+    /// Returns `None` if the frequency is zero (would cause division by zero).
     #[inline]
-    pub fn to_period(&self) -> Seconds {
+    pub fn to_period(&self) -> Option<Seconds> {
+        if self.0 == 0.0 {
+            None
+        } else {
+            Some(Seconds(1.0 / self.0))
+        }
+    }
+
+    /// Convert to period, returning infinity for zero frequency.
+    ///
+    /// Use this when you want a value even for zero frequency (e.g., for plotting).
+    #[inline]
+    pub fn to_period_unchecked(&self) -> Seconds {
         Seconds(1.0 / self.0)
     }
 
@@ -155,6 +183,14 @@ impl Div<f64> for Hertz {
     type Output = Self;
     fn div(self, rhs: f64) -> Self {
         Self(self.0 / rhs)
+    }
+}
+
+// LOW-001 FIX: Add missing Div<Hertz> operator for Hertz
+impl Div<Hertz> for Hertz {
+    type Output = f64;
+    fn div(self, rhs: Hertz) -> f64 {
+        self.0 / rhs.0
     }
 }
 
@@ -233,10 +269,33 @@ impl Add for Ohms {
     }
 }
 
+// LOW-001 FIX: Add missing Sub operator for Ohms
+impl Sub for Ohms {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        Self(self.0 - rhs.0)
+    }
+}
+
 impl Mul<f64> for Ohms {
     type Output = Self;
     fn mul(self, rhs: f64) -> Self {
         Self(self.0 * rhs)
+    }
+}
+
+// LOW-001 FIX: Add missing Div operator for Ohms
+impl Div<f64> for Ohms {
+    type Output = Self;
+    fn div(self, rhs: f64) -> Self {
+        Self(self.0 / rhs)
+    }
+}
+
+impl Div<Ohms> for Ohms {
+    type Output = f64;
+    fn div(self, rhs: Ohms) -> f64 {
+        self.0 / rhs.0
     }
 }
 
@@ -325,9 +384,22 @@ mod tests {
     #[test]
     fn test_frequency_period_reciprocal() {
         let freq = Hertz::from_ghz(16.0);
-        let period = freq.to_period();
+        let period = freq.to_period().expect("non-zero frequency");
 
         assert!((period.as_ps() - 62.5).abs() < 0.01);
-        assert!((period.to_frequency().0 - freq.0).abs() < 1.0);
+        assert!((period.to_frequency().expect("non-zero period").0 - freq.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_zero_handling() {
+        let zero_freq = Hertz::ZERO;
+        let zero_time = Seconds::ZERO;
+
+        assert!(zero_freq.to_period().is_none());
+        assert!(zero_time.to_frequency().is_none());
+
+        // Unchecked versions should return infinity
+        assert!(zero_freq.to_period_unchecked().0.is_infinite());
+        assert!(zero_time.to_frequency_unchecked().0.is_infinite());
     }
 }

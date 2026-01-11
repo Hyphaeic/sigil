@@ -2,6 +2,25 @@
 //!
 //! Waveforms are the primary data structure for signal processing,
 //! representing voltage (or normalized) signals sampled at uniform intervals.
+//!
+//! # Sample Semantics (LOW-006 FIX)
+//!
+//! Samples in a `Waveform` represent **point measurements** at discrete time instants.
+//! For a waveform with `N` samples, the sample times are:
+//!
+//! ```text
+//! t[i] = t_start + i * dt,  for i = 0, 1, ..., N-1
+//! ```
+//!
+//! This means:
+//! - `samples[0]` is measured at time `t_start`
+//! - `samples[N-1]` is measured at time `t_start + (N-1) * dt`
+//! - `t_end()` returns the time of the last sample, not the end of a sampling window
+//! - `duration()` returns `N * dt`, which is the span from `t_start` to one sample *past* the last
+//!
+//! When performing operations like convolution or FFT, this convention should be
+//! maintained consistently. For resampling, linear interpolation is used between
+//! adjacent sample points.
 
 use crate::units::{Seconds, Volts};
 use serde::{Deserialize, Serialize};
@@ -53,8 +72,16 @@ impl Waveform {
     }
 
     /// Time of the last sample.
+    ///
+    /// For a waveform with N samples at times t_start, t_start+dt, ..., t_start+(N-1)*dt,
+    /// this returns t_start + (N-1)*dt, which is the time of the last sample.
+    ///
+    /// Returns t_start if the waveform is empty.
     #[inline]
     pub fn t_end(&self) -> Seconds {
+        if self.samples.is_empty() {
+            return self.t_start;
+        }
         Seconds(self.t_start.0 + (self.samples.len() - 1) as f64 * self.dt.0)
     }
 
@@ -183,26 +210,42 @@ impl Waveform {
     }
 
     /// Trim leading/trailing zeros within a tolerance.
+    ///
+    /// Removes samples from the beginning and end of the waveform that have
+    /// absolute values less than or equal to the tolerance. Updates t_start
+    /// to reflect the new starting time.
     pub fn trim_zeros(&mut self, tolerance: f64) {
+        if self.samples.is_empty() {
+            return;
+        }
+
         // Find first non-zero
         let start = self.samples.iter()
             .position(|&v| v.abs() > tolerance)
-            .unwrap_or(0);
+            .unwrap_or(self.samples.len());
 
         // Find last non-zero
         let end = self.samples.iter()
             .rposition(|&v| v.abs() > tolerance)
-            .unwrap_or(self.samples.len());
+            .unwrap_or(0);
 
-        if start > 0 || end < self.samples.len() - 1 {
-            self.t_start = Seconds(self.t_start.0 + start as f64 * self.dt.0);
-            self.samples = self.samples[start..=end].to_vec();
+        // Check if any trimming is needed
+        if start > 0 || end < self.samples.len().saturating_sub(1) {
+            // Make sure we have a valid range
+            if start <= end {
+                self.t_start = Seconds(self.t_start.0 + start as f64 * self.dt.0);
+                self.samples = self.samples[start..=end].to_vec();
+            } else {
+                // All samples are zeros - reduce to empty
+                self.samples.clear();
+            }
         }
     }
 }
 
 /// Waveform with explicit voltage units.
-#[derive(Clone, Debug)]
+// LOW-003 FIX: Add Serialize/Deserialize to match inner Waveform
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoltageWaveform {
     /// Underlying waveform data.
     pub inner: Waveform,
@@ -247,7 +290,24 @@ pub struct EyeDiagram {
 
 impl EyeDiagram {
     /// Create a new empty eye diagram.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `samples_per_ui` is 0
+    /// - `voltage_bins` is 0
+    /// - `voltage_range.0 >= voltage_range.1` (min >= max)
     pub fn new(samples_per_ui: usize, voltage_bins: usize, voltage_range: (f64, f64)) -> Self {
+        // MED-008 FIX: Validate constructor parameters
+        assert!(samples_per_ui > 0, "samples_per_ui must be > 0, got {}", samples_per_ui);
+        assert!(voltage_bins > 0, "voltage_bins must be > 0, got {}", voltage_bins);
+        assert!(
+            voltage_range.0 < voltage_range.1,
+            "voltage_range min ({}) must be less than max ({})",
+            voltage_range.0,
+            voltage_range.1
+        );
+
         let bins = vec![vec![0u64; voltage_bins]; samples_per_ui];
         Self {
             samples_per_ui,
@@ -256,6 +316,32 @@ impl EyeDiagram {
             voltage_bins,
             ui_count: 0,
         }
+    }
+
+    /// Try to create a new empty eye diagram, returning an error for invalid parameters.
+    pub fn try_new(
+        samples_per_ui: usize,
+        voltage_bins: usize,
+        voltage_range: (f64, f64),
+    ) -> Result<Self, &'static str> {
+        if samples_per_ui == 0 {
+            return Err("samples_per_ui must be > 0");
+        }
+        if voltage_bins == 0 {
+            return Err("voltage_bins must be > 0");
+        }
+        if voltage_range.0 >= voltage_range.1 {
+            return Err("voltage_range min must be less than max");
+        }
+
+        let bins = vec![vec![0u64; voltage_bins]; samples_per_ui];
+        Ok(Self {
+            samples_per_ui,
+            bins,
+            voltage_range,
+            voltage_bins,
+            ui_count: 0,
+        })
     }
 
     /// Add a waveform to the eye diagram.

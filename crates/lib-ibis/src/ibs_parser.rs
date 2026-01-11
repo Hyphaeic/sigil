@@ -577,18 +577,19 @@ fn parse_value_with_suffix(s: &str) -> Option<f64> {
     };
 
     let num: f64 = num_part.parse().ok()?;
-    let multiplier = match suffix.to_lowercase().as_str() {
+    let suffix_lower = suffix.to_lowercase();
+    let multiplier = match suffix_lower.as_str() {
         "t" => 1e12,
         "g" => 1e9,
-        "meg" | "m" if suffix.len() >= 3 => 1e6,
+        "meg" => 1e6,  // "meg" specifically for mega (to avoid confusion with milli)
         "k" => 1e3,
         "" => 1.0,
-        "m" => 1e-3,
-        "u" => 1e-6,
+        "m" => 1e-3,   // Single "m" is milli
+        "u" | "μ" => 1e-6,
         "n" => 1e-9,
         "p" => 1e-12,
         "f" => 1e-15,
-        _ => 1.0,
+        _ => return None,  // Unknown suffix should fail, not silently default
     };
 
     Some(num * multiplier)

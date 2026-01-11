@@ -79,7 +79,9 @@ impl<'a> From<nom::Err<nom::error::Error<&'a str>>> for ParseError {
         match err {
             nom::Err::Incomplete(_) => ParseError::Nom("Incomplete input".to_string()),
             nom::Err::Error(e) | nom::Err::Failure(e) => {
-                ParseError::Nom(format!("at '{}...'", &e.input[..e.input.len().min(20)]))
+                // LOW-004 FIX: Include error kind for better debugging context
+                let preview: String = e.input.chars().take(20).collect();
+                ParseError::Nom(format!("{:?} at '{}...'", e.code, preview))
             }
         }
     }

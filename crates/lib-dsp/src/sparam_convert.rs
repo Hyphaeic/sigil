@@ -45,6 +45,35 @@ impl Default for ConversionConfig {
     }
 }
 
+/// Apply proper Hermitian symmetry to a frequency spectrum for real-valued IFFT output.
+///
+/// For a real-valued time-domain signal, the frequency spectrum must satisfy:
+/// - DC component (index 0) must be real
+/// - Nyquist component (index N/2 for even N) must be real
+/// - X[N-k] = conj(X[k]) for k = 1 to N/2-1
+///
+/// This function modifies the spectrum in place to ensure these properties.
+fn apply_hermitian_symmetry(spectrum: &mut [Complex64]) {
+    let n = spectrum.len();
+    if n == 0 {
+        return;
+    }
+
+    // DC component must be real
+    spectrum[0] = Complex64::new(spectrum[0].re, 0.0);
+
+    // Nyquist component must be real (if N is even)
+    if n % 2 == 0 && n > 1 {
+        let nyquist = n / 2;
+        spectrum[nyquist] = Complex64::new(spectrum[nyquist].re, 0.0);
+    }
+
+    // Mirror for Hermitian symmetry: X[N-k] = conj(X[k])
+    for i in 1..n / 2 {
+        spectrum[n - i] = spectrum[i].conj();
+    }
+}
+
 /// Convert S-parameters to impulse response.
 pub fn sparam_to_impulse(
     sparams: &SParameters,
@@ -52,6 +81,15 @@ pub fn sparam_to_impulse(
 ) -> DspResult<Waveform> {
     if sparams.is_empty() {
         return Err(DspError::InsufficientData { needed: 2, got: 0 });
+    }
+
+    // MED-004 FIX: Validate FFT size to prevent division by zero and ensure valid FFT
+    // Need at least 4 points: num_fft_points / 2 - 1 >= 1 requires num_fft_points >= 4
+    if config.num_fft_points < 4 {
+        return Err(DspError::InvalidFftSize(config.num_fft_points));
+    }
+    if !config.num_fft_points.is_power_of_two() {
+        return Err(DspError::InvalidFftSize(config.num_fft_points));
     }
 
     // Get the transfer function
@@ -75,26 +113,21 @@ pub fn sparam_to_impulse(
 
     // Enforce causality if requested
     let causal = if config.enforce_causality {
-        // Pad to full FFT size with Hermitian symmetry
+        // Pad to full FFT size with proper Hermitian symmetry
         let mut full_spectrum = vec![Complex64::new(0.0, 0.0); config.num_fft_points];
         for (i, &val) in interpolated.iter().enumerate() {
             full_spectrum[i] = val;
         }
-        // Mirror for Hermitian symmetry
-        for i in 1..config.num_fft_points / 2 {
-            full_spectrum[config.num_fft_points - i] = full_spectrum[i].conj();
-        }
+        apply_hermitian_symmetry(&mut full_spectrum);
 
         enforce_causality(&full_spectrum)?
     } else {
-        // Just mirror for IFFT
+        // Just apply Hermitian symmetry for IFFT
         let mut full_spectrum = vec![Complex64::new(0.0, 0.0); config.num_fft_points];
         for (i, &val) in interpolated.iter().enumerate() {
             full_spectrum[i] = val;
         }
-        for i in 1..config.num_fft_points / 2 {
-            full_spectrum[config.num_fft_points - i] = full_spectrum[i].conj();
-        }
+        apply_hermitian_symmetry(&mut full_spectrum);
         full_spectrum
     };
 
