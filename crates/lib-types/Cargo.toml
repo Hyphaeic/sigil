@@ -1,0 +1,16 @@
+[package]
+name = "lib-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core type definitions for SI-Kernel signal integrity simulation"
+
+[dependencies]
+ndarray = { workspace = true }
+num-complex = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

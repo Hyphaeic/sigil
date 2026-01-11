@@ -1,0 +1,25 @@
+[package]
+name = "lib-dsp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "High-performance DSP engine for SI-Kernel signal integrity simulation"
+
+[dependencies]
+lib-types = { workspace = true }
+ndarray = { workspace = true }
+num-complex = { workspace = true }
+rustfft = { workspace = true }
+realfft = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "convolution"
+harness = false

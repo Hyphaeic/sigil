@@ -1,0 +1,23 @@
+[package]
+name = "lib-ami-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Safe FFI wrappers for IBIS-AMI vendor binaries"
+
+[dependencies]
+lib-types = { workspace = true }
+libloading = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+crossbeam = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Threading"] }
+
+[dev-dependencies]
+proptest = { workspace = true }

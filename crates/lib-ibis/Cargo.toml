@@ -1,0 +1,19 @@
+[package]
+name = "lib-ibis"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "IBIS, AMI, and Touchstone file parsers for SI-Kernel"
+
+[dependencies]
+lib-types = { workspace = true }
+ndarray = { workspace = true }
+nom = { workspace = true }
+nom_locate = { workspace = true }
+num-complex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

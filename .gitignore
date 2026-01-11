@@ -1,0 +1,39 @@
+# Build artifacts
+/target/
+
+# Cargo lock file (optional for libraries, but keep for binary projects)
+# Cargo.lock
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Debug files
+*.pdb
+
+# Benchmark and profiling output
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Test coverage
+*.gcno
+*.gcda
+coverage/
+tarpaulin-report.html
+
+# Generated documentation (rebuild with cargo doc)
+/doc/
+
+# Temporary files
+*.tmp
+*.bak

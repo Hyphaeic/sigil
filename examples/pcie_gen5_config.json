@@ -1,0 +1,43 @@
+{
+    "name": "PCIe Gen5 Channel Simulation",
+    "pcie_gen": "gen5",
+    "channel": {
+        "touchstone": "channel.s4p",
+        "input_port": 1,
+        "output_port": 2
+    },
+    "tx": {
+        "ibis": "tx_buffer.ibs",
+        "model": "TX_PCIE_GEN5",
+        "ami": "tx_model.ami",
+        "library": "tx_model.so",
+        "parameters": {
+            "preset": 5,
+            "swing": "full"
+        }
+    },
+    "rx": {
+        "ibis": "rx_buffer.ibs",
+        "model": "RX_PCIE_GEN5",
+        "ami": "rx_model.ami",
+        "library": "rx_model.so",
+        "parameters": {
+            "ctle_boost": 6,
+            "dfe_enable": true
+        }
+    },
+    "simulation": {
+        "mode": "statistical",
+        "num_bits": 1000000,
+        "prbs_order": 31,
+        "samples_per_ui": 64,
+        "link_training": false,
+        "max_training_iterations": 100
+    },
+    "output": {
+        "eye_diagram": true,
+        "bathtub": false,
+        "waveforms": false,
+        "pulse_response": true
+    }
+}
