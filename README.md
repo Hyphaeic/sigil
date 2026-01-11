@@ -26,12 +26,21 @@ SI-Kernel is an open-source Rust implementation of a signal integrity simulation
 | AMI Parser | Scaffold | S-expression parser implemented |
 | Touchstone Parser | Scaffold | Basic 2-port support |
 | AMI FFI | Scaffold | Lifecycle management, untested with real models |
-| DSP Engine | Scaffold | Algorithm stubs, several failing tests |
+| DSP Engine | **Partial** | Passivity and causality enforcement fixed; convolution/PRBS need work |
 | CLI | Scaffold | Basic structure only |
+
+### Recent Fixes
+
+The following critical issues have been addressed per IEEE P370-2020 and IBIS 7.2 standards:
+
+| Issue | Description | Status |
+|-------|-------------|--------|
+| CRIT-DSP-001 | **Passivity Enforcement**: Replaced incorrect element-wise check with SVD-based spectral norm validation per IEEE P370-2020 Section 4.5.2 | Fixed |
+| CRIT-DSP-002 | **Causality Group Delay**: Minimum-phase reconstruction now preserves group delay per IBIS 7.2 Section 6.4.2 | Fixed |
 
 ### Known Limitations
 
-- **DSP algorithms are stubs**: The convolution engine, causality enforcement, PRBS generator, and eye diagram code are placeholder implementations that do not produce correct results
+- **Some DSP algorithms are stubs**: The convolution engine, PRBS generator, and eye diagram code are placeholder implementations that need work
 - **No real-world validation**: The code has not been tested against actual IBIS-AMI models or validated against commercial tools
 - **Performance not optimized**: No SIMD, no GPU acceleration, naive algorithm implementations
 - **Limited file format support**: Only basic Touchstone 1.0 and simple IBIS files
@@ -71,8 +80,8 @@ si-kernel/
 
 - [ ] Implement correct overlap-save convolution algorithm
 - [ ] Fix PRBS generator polynomial implementation
-- [ ] Complete causality enforcement via minimum-phase reconstruction
-- [ ] Implement proper passivity enforcement with eigenvalue scaling
+- [x] ~~Complete causality enforcement via minimum-phase reconstruction~~ (Fixed: CRIT-DSP-002)
+- [x] ~~Implement proper passivity enforcement with eigenvalue scaling~~ (Fixed: CRIT-DSP-001, uses SVD)
 - [ ] Validate AMI FFI against real vendor models
 - [ ] Complete IBIS file parser for all section types
 - [ ] Add Touchstone 2.0 support
@@ -111,6 +120,38 @@ si-kernel/
 - [ ] Usage examples and tutorials
 - [ ] Validation methodology documentation
 - [ ] Performance benchmarking results
+
+## Key APIs
+
+### Passivity Enforcement (lib-dsp)
+
+```rust
+use lib_dsp::passivity::{check_passivity, enforce_passivity, passivity_margin};
+
+// Check if S-parameters are passive (spectral norm ≤ 1)
+let is_passive = check_passivity(&sparams, 1e-6)?;
+
+// Get margin: negative means active, positive means passive
+let margin = passivity_margin(&sparams)?;
+
+// Enforce passivity via SVD clamping
+enforce_passivity(&mut sparams)?;
+```
+
+### Causality Enforcement with Group Delay Preservation (lib-dsp)
+
+```rust
+use lib_dsp::{extract_reference_delay, apply_group_delay, enforce_causality};
+use lib_dsp::sparam_convert::{sparam_to_impulse, ConversionConfig};
+
+// Convert S-params to impulse with IBIS 7.2 compliant delay preservation
+let config = ConversionConfig {
+    preserve_group_delay: true,  // Default: preserves propagation delay
+    ..Default::default()
+};
+let impulse = sparam_to_impulse(&sparams, &config)?;
+// impulse.t_start now reflects actual channel propagation delay
+```
 
 ## Architecture
 

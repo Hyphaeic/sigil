@@ -27,3 +27,8 @@ pub use fft::FftEngine;
 pub use convolution::ConvolutionEngine;
 pub use prbs::PrbsGenerator;
 pub use eye::{EyeAnalyzer, StatisticalEyeAnalyzer};
+pub use causality::{
+    apply_group_delay, enforce_causality, enforce_causality_with_delay_preservation,
+    extract_reference_delay,
+};
+pub use sparam_convert::{sparam_to_impulse, sparam_to_pulse, ConversionConfig};

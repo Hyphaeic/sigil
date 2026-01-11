@@ -1,6 +1,6 @@
 //! S-parameter to time-domain conversion.
 
-use crate::causality::enforce_causality;
+use crate::causality::{apply_group_delay, enforce_causality, extract_reference_delay};
 use crate::error::{DspError, DspResult};
 use crate::fft::FftEngine;
 use crate::interpolation::{interpolate_linear, uniform_frequency_grid};
@@ -30,6 +30,17 @@ pub struct ConversionConfig {
 
     /// Enforce passivity on S-parameters.
     pub enforce_passivity: bool,
+
+    /// Preserve group delay when enforcing causality (IBIS 7.2 compliant).
+    ///
+    /// When true, the reference group delay is extracted from the original
+    /// phase response and re-applied after minimum-phase reconstruction.
+    /// This ensures the impulse response peak appears at the correct
+    /// propagation delay time rather than at t=0.
+    ///
+    /// Per IBIS 7.2 Section 6.4.2: "Group delay shall be preserved when
+    /// enforcing causality."
+    pub preserve_group_delay: bool,
 }
 
 impl Default for ConversionConfig {
@@ -41,6 +52,7 @@ impl Default for ConversionConfig {
             bit_time: Seconds::from_ps(31.25), // PCIe Gen 5
             enforce_causality: true,
             enforce_passivity: true,
+            preserve_group_delay: true, // IBIS 7.2 compliant by default
         }
     }
 }
@@ -111,8 +123,11 @@ pub fn sparam_to_impulse(
     let target_freqs = uniform_frequency_grid(f_min, f_max, config.num_fft_points / 2);
     let interpolated = interpolate_linear(&sparams.frequencies, &transfer, &target_freqs)?;
 
+    // Compute frequency step for later use
+    let df = (f_max.0 - f_min.0) / (config.num_fft_points / 2 - 1) as f64;
+
     // Enforce causality if requested
-    let causal = if config.enforce_causality {
+    let (causal, reference_delay) = if config.enforce_causality {
         // Pad to full FFT size with proper Hermitian symmetry
         let mut full_spectrum = vec![Complex64::new(0.0, 0.0); config.num_fft_points];
         for (i, &val) in interpolated.iter().enumerate() {
@@ -120,7 +135,38 @@ pub fn sparam_to_impulse(
         }
         apply_hermitian_symmetry(&mut full_spectrum);
 
-        enforce_causality(&full_spectrum)?
+        if config.preserve_group_delay {
+            // IBIS 7.2 compliant: preserve group delay
+            // Extract reference delay from original interpolated data (positive frequencies)
+            let freqs: Vec<f64> = target_freqs.iter().map(|h| h.0).collect();
+            let tau_ref = extract_reference_delay(&interpolated, &freqs).unwrap_or(0.0);
+
+            // Apply minimum-phase reconstruction
+            let mut causal = enforce_causality(&full_spectrum)?;
+
+            // Build frequency grid for delay application (full spectrum)
+            let full_freqs: Vec<f64> = (0..config.num_fft_points)
+                .map(|i| {
+                    if i <= config.num_fft_points / 2 {
+                        f_min.0 + i as f64 * df
+                    } else {
+                        // Negative frequencies for Hermitian symmetry
+                        -(f_min.0 + (config.num_fft_points - i) as f64 * df)
+                    }
+                })
+                .collect();
+
+            // Re-apply the group delay
+            apply_group_delay(&mut causal, &full_freqs, tau_ref);
+
+            // Restore Hermitian symmetry after phase modification
+            apply_hermitian_symmetry(&mut causal);
+
+            (causal, tau_ref)
+        } else {
+            // Legacy behavior: minimum-phase only, no delay preservation
+            (enforce_causality(&full_spectrum)?, 0.0)
+        }
     } else {
         // Just apply Hermitian symmetry for IFFT
         let mut full_spectrum = vec![Complex64::new(0.0, 0.0); config.num_fft_points];
@@ -128,7 +174,7 @@ pub fn sparam_to_impulse(
             full_spectrum[i] = val;
         }
         apply_hermitian_symmetry(&mut full_spectrum);
-        full_spectrum
+        (full_spectrum, 0.0)
     };
 
     // IFFT to time domain
@@ -139,13 +185,12 @@ pub fn sparam_to_impulse(
     let samples: Vec<f64> = impulse_complex.iter().map(|c| c.re).collect();
 
     // Compute time step from frequency range
-    let df = (f_max.0 - f_min.0) / (config.num_fft_points / 2 - 1) as f64;
     let dt = Seconds(1.0 / (config.num_fft_points as f64 * df));
 
     Ok(Waveform {
         samples,
         dt,
-        t_start: Seconds::ZERO,
+        t_start: Seconds(reference_delay), // Reflect actual propagation delay
     })
 }
 
@@ -255,5 +300,109 @@ mod tests {
             .collect();
 
         assert!(!nonzero.is_empty());
+    }
+
+    /// Create S-params for a transmission line with known propagation delay.
+    fn create_sparams_with_delay(tau: f64) -> SParameters {
+        let mut sp = SParameters::new(2, lib_types::units::Ohms::Z0_50);
+
+        // Create transfer function H(f) = exp(-αf) * exp(-j2πfτ)
+        // with mild frequency-dependent loss and linear phase
+        for i in 0..100 {
+            let f = (i as f64 + 1.0) * 1e8; // 100 MHz to 10 GHz
+            let loss = (-f * 1e-11).exp(); // Mild loss
+            let phase = -2.0 * std::f64::consts::PI * f * tau;
+
+            let mut m = Array2::zeros((2, 2));
+            m[[0, 0]] = Complex64::new(0.1, 0.0); // S11 = small reflection
+            m[[1, 0]] = Complex64::from_polar(loss, phase); // S21 = through
+            m[[0, 1]] = Complex64::from_polar(loss, phase); // S12 = through (reciprocal)
+            m[[1, 1]] = Complex64::new(0.1, 0.0); // S22 = small reflection
+
+            sp.add_point(Hertz(f), m);
+        }
+
+        sp
+    }
+
+    #[test]
+    fn test_impulse_t_start_reflects_propagation_delay() {
+        // CRIT-DSP-002: Verify impulse t_start reflects actual propagation delay
+        // Using 1ns delay to ensure phase changes per step are well below π
+        let tau = 1e-9; // 1 nanosecond delay
+        let sp = create_sparams_with_delay(tau);
+
+        let config = ConversionConfig {
+            num_fft_points: 1024,
+            preserve_group_delay: true,
+            ..Default::default()
+        };
+
+        let impulse = sparam_to_impulse(&sp, &config).unwrap();
+
+        // t_start should be close to the propagation delay
+        // Allow 50% tolerance due to numerical effects
+        let t_start_ns = impulse.t_start.0 * 1e9;
+        let tau_ns = tau * 1e9;
+
+        assert!(
+            t_start_ns > tau_ns * 0.5 && t_start_ns < tau_ns * 1.5,
+            "t_start ({:.2} ns) should be near propagation delay ({:.2} ns)",
+            t_start_ns,
+            tau_ns
+        );
+    }
+
+    #[test]
+    fn test_legacy_mode_t_start_zero() {
+        // Verify legacy mode (preserve_group_delay=false) has t_start=0
+        let tau = 1e-9;
+        let sp = create_sparams_with_delay(tau);
+
+        let config = ConversionConfig {
+            num_fft_points: 1024,
+            preserve_group_delay: false,
+            ..Default::default()
+        };
+
+        let impulse = sparam_to_impulse(&sp, &config).unwrap();
+
+        assert!(
+            impulse.t_start.0.abs() < 1e-15,
+            "Legacy mode should have t_start=0, got {}",
+            impulse.t_start.0
+        );
+    }
+
+    #[test]
+    fn test_preserve_group_delay_is_default() {
+        let config = ConversionConfig::default();
+        assert!(
+            config.preserve_group_delay,
+            "preserve_group_delay should be true by default for IBIS 7.2 compliance"
+        );
+    }
+
+    #[test]
+    fn test_no_causality_enforcement_preserves_delay() {
+        // When causality is not enforced, t_start should still be 0
+        // (delay is in the phase, not extracted)
+        let tau = 1e-9;
+        let sp = create_sparams_with_delay(tau);
+
+        let config = ConversionConfig {
+            num_fft_points: 1024,
+            enforce_causality: false,
+            preserve_group_delay: true, // Should be ignored when enforce_causality=false
+            ..Default::default()
+        };
+
+        let impulse = sparam_to_impulse(&sp, &config).unwrap();
+
+        // Without causality enforcement, t_start is 0
+        assert!(
+            impulse.t_start.0.abs() < 1e-15,
+            "Without causality enforcement, t_start should be 0"
+        );
     }
 }

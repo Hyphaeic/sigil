@@ -77,6 +77,7 @@ impl Orchestrator {
             bit_time: self.config.bit_time(),
             enforce_causality: true,
             enforce_passivity: true,
+            preserve_group_delay: true, // IBIS 7.2 compliant
         };
 
         let impulse = sparam_to_impulse(&ts.sparams, &conv_config)
