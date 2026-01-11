@@ -185,11 +185,23 @@ impl SParameters {
         true
     }
 
-    /// Check if the network is passive (|S_ij| <= 1).
+    /// Check if the network is passive.
+    ///
+    /// # Deprecated
+    ///
+    /// This method uses an incorrect element-wise check (`|S_ij| ≤ 1`) which is
+    /// insufficient for true passivity validation. A matrix can have all elements
+    /// with magnitude < 1 but still have spectral norm > 1 (non-passive).
+    ///
+    /// Use [`lib_dsp::passivity::check_passivity()`] instead, which correctly
+    /// computes the spectral norm via SVD per IEEE P370-2020 Section 4.5.2.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use lib_dsp::passivity::check_passivity() for correct spectral norm checking"
+    )]
     pub fn is_passive(&self) -> bool {
+        // Keep old (incorrect) behavior for backward compatibility
         for matrix in &self.matrices {
-            // Check singular values <= 1
-            // For now, simple check: all |S_ij| <= 1
             for val in matrix.iter() {
                 if val.norm() > 1.0 + 1e-6 {
                     return false;

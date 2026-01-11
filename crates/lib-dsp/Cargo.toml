@@ -15,6 +15,7 @@ realfft = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+faer = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

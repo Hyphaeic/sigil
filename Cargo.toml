@@ -29,6 +29,7 @@ ndarray = { version = "0.16", features = ["rayon"] }
 num-complex = "0.4"
 rustfft = "6"
 realfft = "3"
+faer = "0.20"
 
 # Parallelism
 rayon = "1.10"
