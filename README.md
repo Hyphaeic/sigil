@@ -8,7 +8,7 @@
 
 ## Overview
 
-SI-Kernel is an open-source Rust implementation of a signal integrity simulation kernel targeting high-speed serial links, specifically PCIe Gen 5 (32 GT/s NRZ) and Gen 6 (64 GT/s PAM4). It provides infrastructure for:
+sigil is an open-source Rust implementation of a signal integrity simulation kernel targeting high-speed serial links, specifically PCIe Gen 5 (32 GT/s NRZ) and Gen 6 (64 GT/s PAM4). It provides infrastructure for:
 
 - Loading and executing vendor IBIS-AMI models via FFI
 - Parsing IBIS, AMI, and Touchstone file formats
