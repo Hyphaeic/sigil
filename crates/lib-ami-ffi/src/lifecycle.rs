@@ -69,6 +69,40 @@ struct GetWaveFfiOutput {
 ///
 /// This struct manages the lifecycle of a single AMI model instance,
 /// ensuring proper initialization, execution, and cleanup.
+///
+/// # Thread Safety (HIGH-FFI-003)
+///
+/// Per IBIS 7.2 Section 10.1:
+///
+/// > "The model may maintain internal state between AMI_Init and AMI_Close.
+/// >  The simulator shall not call the same model instance concurrently
+/// >  from multiple threads."
+///
+/// This struct is intentionally `!Sync` to prevent sharing across threads.
+/// The `_not_sync` marker ensures this at compile time.
+///
+/// ## Correct Usage
+///
+/// ```ignore
+/// // Create separate sessions for parallel simulation
+/// let session1 = AmiSession::new(library.clone());
+/// let session2 = AmiSession::new(library.clone());
+///
+/// // Each session can run in its own thread
+/// thread::spawn(move || session1.init(&config));
+/// thread::spawn(move || session2.init(&config));
+/// ```
+///
+/// ## Incorrect Usage (Won't Compile)
+///
+/// ```ignore
+/// let session = Arc::new(AmiSession::new(library)); // ERROR: !Sync
+/// let s1 = session.clone();
+/// thread::spawn(move || s1.getwave(...)); // Would violate IBIS spec
+/// ```
+///
+/// If you need to share a session, wrap it in a `Mutex<AmiSession>` to
+/// serialize access.
 pub struct AmiSession {
     /// The loaded library.
     library: Arc<AmiLibrary>,
@@ -88,6 +122,10 @@ pub struct AmiSession {
     /// CRIT-FFI-002 FIX: Counter for in-flight FFI operations.
     /// Used to prevent close() while orphaned threads still use the handle.
     pending_ops: Arc<AtomicUsize>,
+
+    /// HIGH-FFI-003 FIX: Marker to prevent Sync implementation.
+    /// This ensures the session cannot be shared across threads without Mutex.
+    _not_sync: std::marker::PhantomData<std::cell::Cell<()>>,
 }
 
 impl AmiSession {
@@ -100,6 +138,7 @@ impl AmiSession {
             config: ExecutionConfig::default(),
             getwave_count: 0,
             pending_ops: Arc::new(AtomicUsize::new(0)),
+            _not_sync: std::marker::PhantomData,
         }
     }
 
@@ -112,6 +151,7 @@ impl AmiSession {
             config,
             getwave_count: 0,
             pending_ops: Arc::new(AtomicUsize::new(0)),
+            _not_sync: std::marker::PhantomData,
         }
     }
 

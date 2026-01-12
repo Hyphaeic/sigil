@@ -9,6 +9,7 @@
 //! - **S-parameter Processing**: Conversion to time domain, interpolation
 //! - **Causality Enforcement**: Hilbert transform for causal responses
 //! - **Passivity Enforcement**: Ensure physical realizability
+//! - **Windowing**: Kaiser-Bessel and other windows for spectral processing
 //! - **PRBS Generation**: Pseudo-random bit sequences for simulation
 //! - **Eye Diagram**: Statistical and time-domain eye analysis
 
@@ -18,6 +19,7 @@ pub mod convolution;
 pub mod interpolation;
 pub mod causality;
 pub mod passivity;
+pub mod window;
 pub mod prbs;
 pub mod eye;
 pub mod sparam_convert;

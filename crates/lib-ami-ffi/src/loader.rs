@@ -158,8 +158,32 @@ impl AmiLibrary {
     }
 }
 
-// AmiLibrary is Send + Sync because we only store function pointers
-// and the Library handle, which are thread-safe to access.
+// HIGH-FFI-003 FIX: Thread Safety Documentation
+//
+// IMPORTANT: While AmiLibrary itself is Send + Sync (it only stores function
+// pointers and a Library handle), the IBIS 7.2 specification (Section 10.1)
+// explicitly states:
+//
+//   "The model may maintain internal state between AMI_Init and AMI_Close.
+//    The simulator shall not call the same model instance concurrently
+//    from multiple threads."
+//
+// This means:
+// - It is safe to LOAD the same .dll/.so from multiple threads
+// - It is NOT safe to call AMI_* functions on the same session from
+//   multiple threads
+// - Each AmiSession should be confined to a single thread, or access
+//   should be serialized via Mutex
+//
+// The AmiSession type in lifecycle.rs does NOT implement Sync, which
+// prevents sharing a session across threads. If you need parallel
+// simulation, create separate AmiSession instances (each with its own
+// AMI_Init call and handle).
+//
+// SAFETY: AmiLibrary stores only function pointers and the dlopen handle.
+// These are inherently thread-safe to store and copy. The thread-safety
+// concern is about CALLING the functions, which is handled at the
+// AmiSession level.
 unsafe impl Send for AmiLibrary {}
 unsafe impl Sync for AmiLibrary {}
 

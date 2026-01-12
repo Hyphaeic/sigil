@@ -6,6 +6,7 @@ use lib_dsp::convolution::ConvolutionEngine;
 use lib_dsp::eye::{EyeAnalyzer, EyeMetrics, StatisticalEyeAnalyzer};
 use lib_dsp::prbs::PrbsGenerator;
 use lib_dsp::sparam_convert::{sparam_to_impulse, sparam_to_pulse, ConversionConfig};
+use lib_dsp::window::WindowConfig;
 use lib_ibis::parse_touchstone;
 use lib_types::units::Seconds;
 use lib_types::waveform::{StatisticalEye, Waveform};
@@ -78,6 +79,7 @@ impl Orchestrator {
             enforce_causality: true,
             enforce_passivity: true,
             preserve_group_delay: true, // IBIS 7.2 compliant
+            window_config: WindowConfig::default(), // HIGH-DSP-003 fix: IEEE P370 Kaiser beta=6
         };
 
         let impulse = sparam_to_impulse(&ts.sparams, &conv_config)

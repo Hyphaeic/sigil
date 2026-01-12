@@ -26,7 +26,7 @@ SI-Kernel is an open-source Rust implementation of a signal integrity simulation
 | AMI Parser | Scaffold | S-expression parser implemented |
 | Touchstone Parser | Scaffold | Basic 2-port support |
 | AMI FFI | Scaffold | Lifecycle management, untested with real models |
-| DSP Engine | **Partial** | Passivity and causality enforcement fixed; convolution/PRBS need work |
+| DSP Engine | **Partial** | Passivity, causality, windowing, DFE-aware eye analysis fixed; convolution/PRBS need work |
 | CLI | Scaffold | Basic structure only |
 
 ### Recent Fixes
@@ -37,6 +37,11 @@ The following critical issues have been addressed per IEEE P370-2020 and IBIS 7.
 |-------|-------------|--------|
 | CRIT-DSP-001 | **Passivity Enforcement**: Replaced incorrect element-wise check with SVD-based spectral norm validation per IEEE P370-2020 Section 4.5.2 | Fixed |
 | CRIT-DSP-002 | **Causality Group Delay**: Minimum-phase reconstruction now preserves group delay per IBIS 7.2 Section 6.4.2 | Fixed |
+| HIGH-DSP-003 | **Gibbs Phenomenon**: Added IEEE P370 Kaiser-Bessel windowing to reduce IFFT truncation artifacts | Fixed |
+| HIGH-DSP-005 | **Transient Discard**: Added IBIS 7.2 compliant warmup period methods for convolution | Fixed |
+| HIGH-PHY-002 | **DFE-Aware ISI**: Statistical eye analyzer now accounts for DFE cancellation per IBIS 7.2 Section 12.4 | Fixed |
+| HIGH-PHY-003 | **Mode Conversion**: Full SDC/SCD mixed-mode S-parameter extraction | Fixed |
+| HIGH-FFI-003 | **Thread Safety**: AmiSession marked `!Sync` with IBIS 7.2 Section 10.1 documentation | Fixed |
 
 ### Known Limitations
 
@@ -111,7 +116,7 @@ si-kernel/
 - [ ] Numerical accuracy tests against reference implementations
 - [ ] Stress testing with malformed input files
 - [ ] Memory leak detection for FFI lifecycle
-- [ ] Thread safety verification for parallel execution
+- [x] ~~Thread safety verification for parallel execution~~ (Fixed: HIGH-FFI-003)
 - [ ] Integration tests with real IBIS-AMI models
 
 ### Documentation

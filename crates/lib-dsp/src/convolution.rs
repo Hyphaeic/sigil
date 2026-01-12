@@ -2,6 +2,15 @@
 //!
 //! This module provides efficient convolution for large bitstreams,
 //! using parallel processing with Rayon.
+//!
+//! # Transient Handling (HIGH-DSP-005 Fix)
+//!
+//! Per IBIS 7.2 Section 11.3: "The statistical eye shall be computed from
+//! steady-state waveform data only. A warm-up period of at least 3x the
+//! impulse response duration shall be discarded."
+//!
+//! The `ConvolutionEngine` provides methods to query the transient length
+//! and to convolve while automatically discarding the initial transient.
 
 use crate::error::{DspError, DspResult};
 use crate::fft::FftEngine;
@@ -211,6 +220,98 @@ impl ConvolutionEngine {
     pub fn fft_size(&self) -> usize {
         self.fft_size
     }
+
+    /// Get the number of transient samples to discard.
+    ///
+    /// The initial transient is `impulse_len - 1` samples, where the
+    /// convolution hasn't reached steady state (ISI not fully accumulated).
+    ///
+    /// # HIGH-DSP-005 Fix
+    ///
+    /// Per IBIS 7.2 Section 11.3: "The statistical eye shall be computed
+    /// from steady-state waveform data only."
+    #[inline]
+    pub fn transient_samples(&self) -> usize {
+        self.impulse_len.saturating_sub(1)
+    }
+
+    /// Get the recommended warmup samples to discard.
+    ///
+    /// Per IBIS 7.2 Section 11.3: "A warm-up period of at least 3x the
+    /// impulse response duration shall be discarded."
+    ///
+    /// This returns `3 * impulse_len` which is more conservative than
+    /// `transient_samples()`.
+    #[inline]
+    pub fn warmup_samples(&self) -> usize {
+        self.impulse_len * 3
+    }
+
+    /// Convolve and return only the steady-state portion.
+    ///
+    /// # HIGH-DSP-005 Fix
+    ///
+    /// Automatically discards the initial transient where ISI hasn't
+    /// reached steady state, per IBIS 7.2 Section 11.3.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - Input signal samples
+    /// * `discard_3x` - If true, discards 3x impulse length (IBIS recommended).
+    ///                  If false, discards only the minimum transient.
+    ///
+    /// # Returns
+    ///
+    /// The steady-state portion of the convolution output.
+    pub fn convolve_steady_state(&self, input: &[f64], discard_3x: bool) -> Vec<f64> {
+        let full_output = self.convolve(input);
+
+        let discard = if discard_3x {
+            self.warmup_samples()
+        } else {
+            self.transient_samples()
+        };
+
+        if discard >= full_output.len() {
+            // Not enough output for steady-state
+            Vec::new()
+        } else {
+            full_output[discard..].to_vec()
+        }
+    }
+
+    /// Convolve a waveform and return only the steady-state portion.
+    ///
+    /// # HIGH-DSP-005 Fix
+    ///
+    /// Automatically discards the initial transient, adjusting t_start
+    /// to reflect the new starting point.
+    pub fn convolve_waveform_steady_state(&self, input: &Waveform, discard_3x: bool) -> Waveform {
+        let discard = if discard_3x {
+            self.warmup_samples()
+        } else {
+            self.transient_samples()
+        };
+
+        let full_output = self.convolve(&input.samples);
+
+        if discard >= full_output.len() {
+            // Not enough output for steady-state
+            Waveform {
+                samples: Vec::new(),
+                dt: input.dt,
+                t_start: input.t_start,
+            }
+        } else {
+            let samples = full_output[discard..].to_vec();
+            let t_start = Seconds(input.t_start.0 + discard as f64 * input.dt.0);
+            Waveform {
+                samples,
+                dt: input.dt,
+                t_start,
+            }
+        }
+    }
 }
 
 /// Direct convolution (for comparison/validation).
@@ -320,5 +421,66 @@ mod tests {
         for (i, (&d, &r)) in direct.iter().zip(result.iter()).enumerate().take(50) {
             assert!((d - r).abs() < 1e-10, "Mismatch at index {}: {} vs {}", i, d, r);
         }
+    }
+
+    #[test]
+    fn test_transient_samples() {
+        let kernel = vec![1.0, 0.5, 0.25, 0.125]; // 4 samples
+        let engine = ConvolutionEngine::new(&kernel).unwrap();
+
+        // Transient = impulse_len - 1 = 3
+        assert_eq!(engine.transient_samples(), 3);
+
+        // Warmup = 3 * impulse_len = 12
+        assert_eq!(engine.warmup_samples(), 12);
+    }
+
+    #[test]
+    fn test_convolve_steady_state() {
+        let kernel = vec![1.0, 0.5, 0.25, 0.125]; // 4 samples
+        let signal = vec![1.0; 100];
+
+        let engine = ConvolutionEngine::new(&kernel).unwrap();
+
+        // Full convolution
+        let full = engine.convolve(&signal);
+        assert_eq!(full.len(), 103); // 100 + 4 - 1
+
+        // Steady-state with minimum transient discard
+        let steady = engine.convolve_steady_state(&signal, false);
+        assert_eq!(steady.len(), 100); // 103 - 3
+
+        // Steady-state with 3x warmup discard
+        let steady_3x = engine.convolve_steady_state(&signal, true);
+        assert_eq!(steady_3x.len(), 91); // 103 - 12
+
+        // Verify steady-state portion matches
+        for (i, (&s, &f)) in steady.iter().zip(full[3..].iter()).enumerate() {
+            assert!(
+                (s - f).abs() < 1e-10,
+                "Mismatch at steady-state index {}: {} vs {}",
+                i, s, f
+            );
+        }
+    }
+
+    #[test]
+    fn test_convolve_waveform_steady_state() {
+        let kernel = vec![1.0, 0.5, 0.25, 0.125];
+        let signal = vec![1.0; 100];
+        let dt = Seconds::from_ps(10.0);
+        let t_start = Seconds::ZERO;
+
+        let input = Waveform::new(signal, dt, t_start);
+        let engine = ConvolutionEngine::new(&kernel).unwrap();
+
+        let steady = engine.convolve_waveform_steady_state(&input, false);
+
+        // Check length
+        assert_eq!(steady.samples.len(), 100);
+
+        // Check t_start is advanced by transient time
+        let expected_t_start = Seconds::from_ps(30.0); // 3 samples * 10 ps
+        assert!((steady.t_start.0 - expected_t_start.0).abs() < 1e-20);
     }
 }

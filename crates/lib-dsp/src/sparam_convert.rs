@@ -5,6 +5,7 @@ use crate::error::{DspError, DspResult};
 use crate::fft::FftEngine;
 use crate::interpolation::{interpolate_linear, uniform_frequency_grid};
 use crate::passivity::enforce_passivity;
+use crate::window::{apply_edge_taper, WindowConfig, WindowType};
 use lib_types::sparams::SParameters;
 use lib_types::units::{Hertz, Seconds};
 use lib_types::waveform::Waveform;
@@ -41,6 +42,18 @@ pub struct ConversionConfig {
     /// Per IBIS 7.2 Section 6.4.2: "Group delay shall be preserved when
     /// enforcing causality."
     pub preserve_group_delay: bool,
+
+    /// Windowing configuration for spectral processing.
+    ///
+    /// # IEEE P370 Compliance
+    ///
+    /// Per IEEE P370-2020 Section 5.3.1: "A suitable windowing function
+    /// (e.g., Kaiser-Bessel with beta=6) shall be applied before inverse
+    /// transformation to minimize truncation artifacts."
+    ///
+    /// When enabled, applies a taper window to the high-frequency edge
+    /// of the S-parameter data to reduce Gibbs phenomenon ringing.
+    pub window_config: WindowConfig,
 }
 
 impl Default for ConversionConfig {
@@ -53,6 +66,7 @@ impl Default for ConversionConfig {
             enforce_causality: true,
             enforce_passivity: true,
             preserve_group_delay: true, // IBIS 7.2 compliant by default
+            window_config: WindowConfig::default(), // IEEE P370 compliant (Kaiser beta=6)
         }
     }
 }
@@ -121,7 +135,21 @@ pub fn sparam_to_impulse(
     })?;
 
     let target_freqs = uniform_frequency_grid(f_min, f_max, config.num_fft_points / 2);
-    let interpolated = interpolate_linear(&sparams.frequencies, &transfer, &target_freqs)?;
+    let mut interpolated = interpolate_linear(&sparams.frequencies, &transfer, &target_freqs)?;
+
+    // HIGH-DSP-003 FIX: Apply windowing to reduce Gibbs phenomenon
+    // Per IEEE P370-2020 Section 5.3.1: "A suitable windowing function
+    // (e.g., Kaiser-Bessel with beta=6) shall be applied before inverse
+    // transformation to minimize truncation artifacts."
+    if config.window_config.enabled {
+        let data_len = interpolated.len();
+        apply_edge_taper(
+            &mut interpolated,
+            config.window_config.window_type,
+            data_len,
+            config.window_config.taper_fraction,
+        );
+    }
 
     // Compute frequency step for later use
     let df = (f_max.0 - f_min.0) / (config.num_fft_points / 2 - 1) as f64;
