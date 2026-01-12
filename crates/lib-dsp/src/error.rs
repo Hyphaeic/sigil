@@ -40,6 +40,23 @@ pub enum DspError {
     /// Operation not supported.
     #[error("Operation not supported: {0}")]
     NotSupported(String),
+
+    /// Invalid configuration parameter.
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
+
+    /// Nyquist criterion violated (insufficient sampling).
+    ///
+    /// # HIGH-PHYS-006 Fix
+    ///
+    /// Indicates that the sampling rate is insufficient for the signal bandwidth,
+    /// which would cause aliasing and incorrect convolution results.
+    #[error("Nyquist violation: need {required} samples/UI for {bandwidth_ghz:.1} GHz bandwidth, got {provided}")]
+    NyquistViolation {
+        required: usize,
+        provided: usize,
+        bandwidth_ghz: f64,
+    },
 }
 
 /// Result type for DSP operations.

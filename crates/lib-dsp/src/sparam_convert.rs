@@ -1,6 +1,7 @@
 //! S-parameter to time-domain conversion.
 
 use crate::causality::{apply_group_delay, enforce_causality, extract_reference_delay};
+use crate::convolution::FftSizeStrategy;
 use crate::error::{DspError, DspResult};
 use crate::fft::FftEngine;
 use crate::interpolation::{interpolate_linear, uniform_frequency_grid};
@@ -54,6 +55,17 @@ pub struct ConversionConfig {
     /// When enabled, applies a taper window to the high-frequency edge
     /// of the S-parameter data to reduce Gibbs phenomenon ringing.
     pub window_config: WindowConfig,
+
+    /// FFT sizing strategy for convolution.
+    ///
+    /// # HIGH-DSP-004 and HIGH-PHYS-007 Fix
+    ///
+    /// Controls frequency resolution (Δf) to capture narrowband resonances.
+    /// For channels with connector stubs or via anti-resonances, use
+    /// `FftSizeStrategy::Bandwidth` to ensure adequate spectral resolution.
+    ///
+    /// Default: Auto (4x impulse length, minimum 1024)
+    pub fft_strategy: FftSizeStrategy,
 }
 
 impl Default for ConversionConfig {
@@ -67,6 +79,7 @@ impl Default for ConversionConfig {
             enforce_passivity: true,
             preserve_group_delay: true, // IBIS 7.2 compliant by default
             window_config: WindowConfig::default(), // IEEE P370 compliant (Kaiser beta=6)
+            fft_strategy: FftSizeStrategy::Auto, // HIGH-DSP-004 fix: configurable strategy
         }
     }
 }
@@ -128,13 +141,19 @@ pub fn sparam_to_impulse(
         transfer = sparams_copy.get_parameter(config.output_port, config.input_port);
     }
 
-    // Interpolate to uniform frequency grid
+    // CRIT-PHYS-002 FIX: Interpolate to uniform frequency grid starting at DC
+    // Per Kramers-Kronig relations, the frequency spectrum must start at 0 Hz (DC)
+    // to preserve the Hilbert-pair relationship between Re(H) and Im(H).
+    // Industry S-parameter files never include DC, so we must extrapolate.
     let (f_min, f_max) = sparams.frequency_range().ok_or(DspError::InsufficientData {
         needed: 2,
         got: sparams.len(),
     })?;
 
-    let target_freqs = uniform_frequency_grid(f_min, f_max, config.num_fft_points / 2);
+    // Create frequency grid from DC (0 Hz) to f_max
+    // This ensures the DC bin (index 0) contains S21(0) ≈ 1, not S21(f_min)
+    let num_positive_freqs = config.num_fft_points / 2 + 1; // Include DC and Nyquist
+    let target_freqs = uniform_frequency_grid(Hertz(0.0), f_max, num_positive_freqs);
     let mut interpolated = interpolate_linear(&sparams.frequencies, &transfer, &target_freqs)?;
 
     // HIGH-DSP-003 FIX: Apply windowing to reduce Gibbs phenomenon
@@ -151,13 +170,16 @@ pub fn sparam_to_impulse(
         );
     }
 
-    // Compute frequency step for later use
-    let df = (f_max.0 - f_min.0) / (config.num_fft_points / 2 - 1) as f64;
+    // Compute frequency step: now spans 0 to f_max
+    let df = f_max.0 / (config.num_fft_points / 2) as f64;
 
     // Enforce causality if requested
     let (causal, reference_delay) = if config.enforce_causality {
-        // Pad to full FFT size with proper Hermitian symmetry
+        // CRIT-PHYS-002: Build full spectrum with proper DC bin
+        // interpolated now contains DC (index 0) through Nyquist
         let mut full_spectrum = vec![Complex64::new(0.0, 0.0); config.num_fft_points];
+
+        // Copy positive frequencies (DC through Nyquist)
         for (i, &val) in interpolated.iter().enumerate() {
             full_spectrum[i] = val;
         }
@@ -172,14 +194,15 @@ pub fn sparam_to_impulse(
             // Apply minimum-phase reconstruction
             let mut causal = enforce_causality(&full_spectrum)?;
 
-            // Build frequency grid for delay application (full spectrum)
+            // CRIT-PHYS-002: Build frequency grid starting at DC (not f_min)
             let full_freqs: Vec<f64> = (0..config.num_fft_points)
                 .map(|i| {
                     if i <= config.num_fft_points / 2 {
-                        f_min.0 + i as f64 * df
+                        // Positive frequencies: 0, df, 2*df, ..., Nyquist
+                        i as f64 * df
                     } else {
                         // Negative frequencies for Hermitian symmetry
-                        -(f_min.0 + (config.num_fft_points - i) as f64 * df)
+                        -((config.num_fft_points - i) as f64 * df)
                     }
                 })
                 .collect();
@@ -196,7 +219,8 @@ pub fn sparam_to_impulse(
             (enforce_causality(&full_spectrum)?, 0.0)
         }
     } else {
-        // Just apply Hermitian symmetry for IFFT
+        // CRIT-PHYS-002: Just apply Hermitian symmetry for IFFT (no causality enforcement)
+        // interpolated now contains DC (index 0) through Nyquist
         let mut full_spectrum = vec![Complex64::new(0.0, 0.0); config.num_fft_points];
         for (i, &val) in interpolated.iter().enumerate() {
             full_spectrum[i] = val;
@@ -228,17 +252,20 @@ pub fn sparam_to_impulse(
 /// the difference between step and delayed step (equivalent to convolving
 /// with a rectangular pulse of duration `bit_time`).
 ///
-/// The impulse response is assumed to be normalized per-sample (discrete-time),
-/// not scaled by the sample interval.
+/// # CRIT-PHYS-003 Fix
+///
+/// The impulse response from `sparam_to_impulse` has units of 1/s (V/Vs).
+/// The step response is ∫h(t)dt, which requires multiplying each sample by dt
+/// to ensure the result is independent of FFT size and sampling density.
 pub fn impulse_to_pulse(impulse: &Waveform, bit_time: Seconds) -> Waveform {
     let samples_per_bit = (bit_time.0 / impulse.dt.0).round() as usize;
 
-    // Integrate impulse to get step response (cumulative sum)
-    // Note: we don't scale by dt since impulse is in per-sample units
+    // Integrate impulse to get step response (cumulative sum with dt scaling)
+    // CRIT-PHYS-003: Scale by dt to ensure pulse energy is invariant to FFT size
     let mut step: Vec<f64> = Vec::with_capacity(impulse.samples.len());
     let mut cumsum = 0.0;
     for &sample in &impulse.samples {
-        cumsum += sample;
+        cumsum += sample * impulse.dt.0;  // CRIT-PHYS-003 fix: multiply by dt
         step.push(cumsum);
     }
 
@@ -317,22 +344,35 @@ mod tests {
 
     #[test]
     fn test_impulse_to_pulse() {
-        // Create a simple impulse
+        // CRIT-PHYS-003 fix: Create a physically correct impulse with units of 1/s
+        // For a discrete impulse, h[n] should have units of 1/s (or V/Vs)
         let mut samples = vec![0.0; 1000];
-        samples[100] = 1.0;
+        let dt = Seconds::from_ps(1.0);
 
-        let impulse = Waveform::new(samples, Seconds::from_ps(1.0), Seconds::ZERO);
+        // A unit impulse in continuous time has ∫h(t)dt = 1
+        // In discrete time: h[n] * dt ≈ 1, so h[n] ≈ 1/dt
+        samples[100] = 1.0 / dt.0; // Units: 1/s
+
+        let impulse = Waveform::new(samples, dt, Seconds::ZERO);
         let pulse = impulse_to_pulse(&impulse, Seconds::from_ps(50.0));
 
         // Pulse should have width of ~50 samples
+        // After integration with dt scaling, the pulse amplitude should be ~1.0
         let nonzero: Vec<_> = pulse
             .samples
             .iter()
             .enumerate()
-            .filter(|(_, &v)| v.abs() > 0.01)
+            .filter(|(_, &v)| v.abs() > 0.1)
             .collect();
 
-        assert!(!nonzero.is_empty());
+        assert!(!nonzero.is_empty(), "Pulse should have nonzero samples");
+
+        // Verify pulse width is approximately 50 samples
+        assert!(
+            nonzero.len() >= 40 && nonzero.len() <= 60,
+            "Pulse width should be ~50 samples, got {}",
+            nonzero.len()
+        );
     }
 
     /// Create S-params for a transmission line with known propagation delay.

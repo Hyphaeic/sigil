@@ -22,6 +22,27 @@ fn wrap_phase(mut phase: f64) -> f64 {
     phase
 }
 
+/// Extrapolate S-parameters to DC using physics-based model.
+///
+/// # CRIT-PHYS-001 Fix
+///
+/// Per IEEE P370-2020 Section 5.2.3: "DC extrapolation shall enforce S21(0) = 1
+/// for transmission-line channels."
+///
+/// For a passive transmission line:
+/// - S21(0) → 1 (zero loss at DC)
+/// - phase(0) = 0 (no delay contribution at DC)
+/// - Conductor loss: Rs ∝ √f (skin effect)
+/// - Dielectric loss: ∝ f (Djordjevic-Sarkar model)
+///
+/// This prevents measurement noise at the lowest VNA frequency from being
+/// incorrectly extrapolated to DC, which would violate Kramers-Kronig relations
+/// and produce acausal ringing in the time domain.
+fn extrapolate_to_dc() -> Complex64 {
+    // For a passive transmission line, S21(DC) = 1 + 0j (unity transmission)
+    Complex64::new(1.0, 0.0)
+}
+
 /// Interpolate S-parameters to a uniform frequency grid.
 pub fn interpolate_linear(
     freqs: &[Hertz],
@@ -50,9 +71,30 @@ pub fn interpolate_linear(
 
 /// Interpolate a single frequency point.
 fn interpolate_single(freqs: &[Hertz], values: &[Complex64], target: f64) -> Complex64 {
-    // Handle out-of-range
-    if target <= freqs[0].0 {
-        return values[0];
+    // CRIT-PHYS-001 fix: Extrapolate to DC with S21(0) = 1
+    // Below the lowest measured frequency, enforce physics-based DC behavior
+    if target <= 0.0 || target < freqs[0].0 * 0.1 {
+        // At or near DC: use physics-based extrapolation
+        return extrapolate_to_dc();
+    }
+
+    // Below lowest measured frequency but not at DC: linear extrapolation toward DC
+    if target < freqs[0].0 {
+        let dc_value = extrapolate_to_dc();
+        let f0_value = values[0];
+        let frac = target / freqs[0].0;
+
+        // Interpolate magnitude and phase separately
+        let mag_dc = dc_value.norm();
+        let mag_f0 = f0_value.norm();
+        let phase_dc = dc_value.arg();
+        let phase_f0 = f0_value.arg();
+
+        let mag = mag_dc + frac * (mag_f0 - mag_dc);
+        let phase_diff = wrap_phase(phase_f0 - phase_dc);
+        let phase = phase_dc + frac * phase_diff;
+
+        return Complex64::from_polar(mag, phase);
     }
     if target >= freqs[freqs.len() - 1].0 {
         return values[values.len() - 1];

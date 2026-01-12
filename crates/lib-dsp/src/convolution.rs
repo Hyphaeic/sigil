@@ -15,11 +15,52 @@
 use crate::error::{DspError, DspResult};
 use crate::fft::FftEngine;
 use lib_types::waveform::Waveform;
-use lib_types::units::Seconds;
+use lib_types::units::{Hertz, Seconds};
 use num_complex::Complex64;
 use rayon::prelude::*;
 use rustfft::Fft;
 use std::sync::Arc;
+
+/// FFT sizing strategy for convolution.
+///
+/// # HIGH-DSP-004 and HIGH-PHYS-007 Fix
+///
+/// Controls the frequency resolution (Δf) of the convolution FFT.
+/// Different strategies optimize for different channel characteristics.
+#[derive(Clone, Debug)]
+pub enum FftSizeStrategy {
+    /// Automatic sizing: 4x impulse length, minimum 1024.
+    ///
+    /// Good default for most channels. Fast and memory-efficient.
+    Auto,
+
+    /// Bandwidth-based sizing: ensure Δf captures narrowband features.
+    ///
+    /// Required for channels with sharp resonances (connector stubs, vias).
+    /// Ensures Δf ≤ f_resonance / Q for Q-factor resonances.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use lib_dsp::FftSizeStrategy;
+    /// use lib_types::units::Hertz;
+    /// // Capture resonances with Q=50 at 10 GHz
+    /// // Requires Δf ≤ 10 GHz / 50 = 200 MHz
+    /// let strategy = FftSizeStrategy::Bandwidth { min_delta_f: Hertz(200e6) };
+    /// ```
+    Bandwidth { min_delta_f: Hertz },
+
+    /// User-specified fixed size.
+    ///
+    /// For manual tuning or matching external tool configurations.
+    /// Must be a power of 2.
+    Fixed { size: usize },
+}
+
+impl Default for FftSizeStrategy {
+    fn default() -> Self {
+        FftSizeStrategy::Auto
+    }
+}
 
 /// High-performance convolution engine.
 ///
@@ -55,20 +96,84 @@ impl ConvolutionEngine {
     ///
     /// # FFT Size Selection
     ///
-    /// The FFT size is chosen to balance:
-    /// - Efficiency (larger is better for FFT)
-    /// - Memory (smaller uses less RAM)
-    /// - Parallelism (more chunks = more parallel work)
+    /// Uses automatic sizing (4x impulse length, minimum 1024).
+    /// For custom FFT sizing, use [`ConvolutionEngine::with_strategy`].
     pub fn new(impulse: &[f64]) -> DspResult<Self> {
+        Self::with_strategy(impulse, Seconds(1.0), FftSizeStrategy::Auto)
+    }
+
+    /// Create a convolution engine with a custom FFT sizing strategy.
+    ///
+    /// # HIGH-DSP-004 and HIGH-PHYS-007 Fix
+    ///
+    /// Allows control over frequency resolution to capture narrowband resonances.
+    ///
+    /// # Arguments
+    ///
+    /// * `impulse` - The impulse response to convolve with
+    /// * `dt` - Time step of the impulse (used for bandwidth-based sizing)
+    /// * `strategy` - FFT sizing strategy
+    ///
+    /// # FFT Size Selection Strategies
+    ///
+    /// - **Auto**: 4x impulse length (fast, may miss narrow resonances)
+    /// - **Bandwidth**: Ensures Δf ≤ min_delta_f (captures resonances with Q > f/Δf)
+    /// - **Fixed**: User-specified size (must be power of 2)
+    pub fn with_strategy(
+        impulse: &[f64],
+        dt: Seconds,
+        strategy: FftSizeStrategy,
+    ) -> DspResult<Self> {
         let impulse_len = impulse.len();
         if impulse_len == 0 {
             return Err(DspError::InsufficientData { needed: 1, got: 0 });
         }
 
-        // Choose FFT size: 4x impulse length, minimum 1024
-        let fft_size = (impulse_len * 4).next_power_of_two().max(1024);
+        // HIGH-DSP-004 and HIGH-PHYS-007 FIX: Select FFT size based on strategy
+        let fft_size = match strategy {
+            FftSizeStrategy::Auto => {
+                // Original heuristic: 4x impulse length, minimum 1024
+                (impulse_len * 4).next_power_of_two().max(1024)
+            }
+            FftSizeStrategy::Bandwidth { min_delta_f } => {
+                // Bandwidth-based: ensure Δf ≤ min_delta_f
+                // Δf = 1 / (N × dt), so N = 1 / (Δf × dt)
+                let n_from_bandwidth = (1.0 / (min_delta_f.0 * dt.0)).ceil() as usize;
+
+                // Also ensure we don't go smaller than impulse requires
+                let n_from_impulse = impulse_len * 2;
+
+                n_from_bandwidth.max(n_from_impulse).next_power_of_two()
+            }
+            FftSizeStrategy::Fixed { size } => {
+                if !size.is_power_of_two() {
+                    return Err(DspError::InvalidFftSize(size));
+                }
+                if size < impulse_len {
+                    return Err(DspError::InvalidConfig(format!(
+                        "FFT size {} is smaller than impulse length {}",
+                        size, impulse_len
+                    )));
+                }
+                size
+            }
+        };
         let overlap = impulse_len - 1;
         let valid_size = fft_size - overlap;
+
+        // Log FFT size selection rationale
+        let delta_f = if dt.0 > 0.0 {
+            1.0 / (fft_size as f64 * dt.0)
+        } else {
+            0.0
+        };
+
+        tracing::debug!(
+            "ConvolutionEngine: FFT size={}, impulse_len={}, Δf={:.1} MHz",
+            fft_size,
+            impulse_len,
+            delta_f * 1e-6
+        );
 
         // Create FFT plans
         let mut engine = FftEngine::new();
@@ -96,8 +201,23 @@ impl ConvolutionEngine {
     }
 
     /// Create from a waveform impulse response.
+    ///
+    /// Uses automatic FFT sizing. For custom sizing, use
+    /// [`ConvolutionEngine::from_waveform_with_strategy`].
     pub fn from_waveform(impulse: &Waveform) -> DspResult<Self> {
-        Self::new(&impulse.samples)
+        Self::with_strategy(&impulse.samples, impulse.dt, FftSizeStrategy::Auto)
+    }
+
+    /// Create from a waveform with a custom FFT sizing strategy.
+    ///
+    /// # HIGH-DSP-004 and HIGH-PHYS-007 Fix
+    ///
+    /// Uses the waveform's dt for bandwidth-based FFT sizing.
+    pub fn from_waveform_with_strategy(
+        impulse: &Waveform,
+        strategy: FftSizeStrategy,
+    ) -> DspResult<Self> {
+        Self::with_strategy(&impulse.samples, impulse.dt, strategy)
     }
 
     /// Convolve an input signal with the impulse response.

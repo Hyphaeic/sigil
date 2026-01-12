@@ -80,6 +80,7 @@ impl Orchestrator {
             enforce_passivity: true,
             preserve_group_delay: true, // IBIS 7.2 compliant
             window_config: WindowConfig::default(), // HIGH-DSP-003 fix: IEEE P370 Kaiser beta=6
+            fft_strategy: lib_dsp::FftSizeStrategy::Auto, // HIGH-DSP-004 fix: configurable sizing
         };
 
         let impulse = sparam_to_impulse(&ts.sparams, &conv_config)
@@ -135,20 +136,56 @@ impl Orchestrator {
             self.config.simulation.num_bits
         );
 
-        // Create convolution engine
-        let conv_engine = ConvolutionEngine::from_waveform(channel_impulse)
+        let bit_time = self.config.bit_time();
+        let samples_per_ui = self.config.simulation.samples_per_ui;
+        let stimulus_dt = Seconds(bit_time.0 / samples_per_ui as f64);
+
+        // HIGH-PHYS-006 FIX: Validate Nyquist criterion
+        let channel_bw = lib_dsp::estimate_bandwidth(channel_impulse)
+            .context("Failed to estimate channel bandwidth")?;
+
+        lib_dsp::validate_nyquist(bit_time, samples_per_ui, channel_bw)
+            .context("Nyquist criterion violated")?;
+
+        tracing::debug!(
+            "Nyquist check passed: {:.1} GHz bandwidth, {} samples/UI",
+            channel_bw * 1e-9,
+            samples_per_ui
+        );
+
+        // HIGH-PHYS-006 FIX: Ensure impulse and stimulus have compatible dt
+        let impulse_for_conv = if !lib_dsp::are_compatible_dt(
+            channel_impulse.dt,
+            stimulus_dt,
+            1e-6, // 0.0001% relative tolerance
+        ) {
+            tracing::warn!(
+                "Resampling impulse: dt={:.3e}s → dt={:.3e}s (samples_per_ui={})",
+                channel_impulse.dt.0,
+                stimulus_dt.0,
+                samples_per_ui
+            );
+            lib_dsp::resample_waveform(channel_impulse, stimulus_dt)
+                .context("Failed to resample impulse response")?
+        } else {
+            tracing::debug!(
+                "Impulse dt={:.3e}s matches stimulus dt (no resampling needed)",
+                channel_impulse.dt.0
+            );
+            channel_impulse.clone()
+        };
+
+        // Create convolution engine with aligned impulse
+        let conv_engine = ConvolutionEngine::from_waveform(&impulse_for_conv)
             .context("Failed to create convolution engine")?;
 
         // Generate PRBS
         let mut prbs = PrbsGenerator::new(self.config.simulation.prbs_order);
-        let bit_time = self.config.bit_time();
-        let samples_per_ui = self.config.simulation.samples_per_ui;
-        let dt = Seconds(bit_time.0 / samples_per_ui as f64);
 
         let input_waveform = prbs.generate_nrz(
             self.config.simulation.num_bits,
             samples_per_ui,
-            dt,
+            stimulus_dt,
         );
 
         tracing::debug!("Generated {} input samples", input_waveform.len());

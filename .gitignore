@@ -38,3 +38,6 @@ tarpaulin-report.html
 *.tmp
 *.bak
 docs/ISSUES.md
+docs/fdrs.md
+docs/Track 13_Modeling & Analysis of Interconnects_Distributed-Physical-Based_Transmission-Line Model_of_PCIe5 _He_V3.pdf
+docs/PHASE1_COMPLETE.md
