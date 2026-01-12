@@ -25,14 +25,20 @@ impl PrbsGenerator {
     /// Create a new PRBS generator.
     ///
     /// Supported orders: 7, 9, 11, 15, 23, 31
+    ///
+    /// Uses maximal-length LFSR polynomials per ITU-T O.150.
+    /// The tap positions are chosen for a right-shifting Fibonacci LFSR
+    /// where feedback is inserted at the MSB.
     pub fn new(order: u8) -> Self {
+        // Tap positions for right-shift LFSR (reciprocal polynomials)
+        // These use low-bit taps so initial state=1 doesn't decay to zero
         let (taps, length) = match order {
-            7 => (0b1100000, (1u64 << 7) - 1),
-            9 => (0b100010000, (1u64 << 9) - 1),
-            11 => (0b10100000000, (1u64 << 11) - 1),
-            15 => (0b110000000000000, (1u64 << 15) - 1),
-            23 => (0b100001000000000000000, (1u64 << 23) - 1),
-            31 => (0b1001000000000000000000000000000, (1u64 << 31) - 1),
+            7 => (0b11, (1u64 << 7) - 1),             // x^7 + x + 1
+            9 => (0b10001, (1u64 << 9) - 1),          // x^9 + x^4 + 1
+            11 => (0b101, (1u64 << 11) - 1),          // x^11 + x^2 + 1
+            15 => (0b11, (1u64 << 15) - 1),           // x^15 + x + 1
+            23 => (0b100001, (1u64 << 23) - 1),       // x^23 + x^5 + 1
+            31 => (0b1001, (1u64 << 31) - 1),         // x^31 + x^3 + 1
             _ => panic!("Unsupported PRBS order: {order}. Use 7, 9, 11, 15, 23, or 31"),
         };
 

@@ -119,56 +119,82 @@ impl ConvolutionEngine {
         }
     }
 
-    /// Sequential convolution for small inputs.
+    /// Sequential convolution for small inputs using overlap-save method.
     fn convolve_sequential(&self, input: &[f64], output_len: usize) -> Vec<f64> {
         let mut output = vec![0.0; output_len];
 
         let mut chunk_idx = 0;
-        let mut input_pos = 0;
+        let mut input_pos: isize = -(self.overlap as isize); // Start before input for proper overlap
 
-        while input_pos < input.len() {
-            let chunk_end = (input_pos + self.fft_size).min(input.len());
-            let chunk_result = self.convolve_chunk(&input[input_pos..chunk_end]);
+        while (input_pos as usize) < input.len() + self.overlap {
+            // Build input chunk with overlap from previous section
+            let mut chunk = vec![0.0; self.fft_size];
+            for i in 0..self.fft_size {
+                let src_idx = input_pos + i as isize;
+                if src_idx >= 0 && (src_idx as usize) < input.len() {
+                    chunk[i] = input[src_idx as usize];
+                }
+                // Otherwise remains 0 (zero-padding)
+            }
 
-            // Overlap-add
+            let chunk_result = self.convolve_chunk(&chunk);
+
+            // Overlap-save: discard first `overlap` samples (invalid due to circular conv)
+            // Keep the remaining `valid_size` samples
             let output_start = chunk_idx * self.valid_size;
-            for (i, &val) in chunk_result.iter().enumerate() {
+            for i in 0..self.valid_size {
                 let out_idx = output_start + i;
                 if out_idx < output_len {
-                    output[out_idx] += val;
+                    output[out_idx] = chunk_result[self.overlap + i];
                 }
             }
 
-            input_pos += self.valid_size;
+            input_pos += self.valid_size as isize;
             chunk_idx += 1;
         }
 
         output
     }
 
-    /// Parallel convolution for large inputs.
+    /// Parallel convolution for large inputs using overlap-save method.
     fn convolve_parallel(&self, input: &[f64], output_len: usize, num_chunks: usize) -> Vec<f64> {
+        let overlap = self.overlap;
+        let valid_size = self.valid_size;
+        let fft_size = self.fft_size;
+        let input_len = input.len();
+
         // Process chunks in parallel
         let chunk_results: Vec<(usize, Vec<f64>)> = (0..num_chunks)
             .into_par_iter()
             .map(|chunk_idx| {
-                let start = chunk_idx * self.valid_size;
-                let end = (start + self.fft_size).min(input.len());
+                // For overlap-save, input position starts before actual input
+                let input_pos = (chunk_idx * valid_size) as isize - overlap as isize;
 
-                let chunk_result = self.convolve_chunk(&input[start..end]);
+                // Build input chunk with proper overlap
+                let mut chunk = vec![0.0; fft_size];
+                for i in 0..fft_size {
+                    let src_idx = input_pos + i as isize;
+                    if src_idx >= 0 && (src_idx as usize) < input_len {
+                        chunk[i] = input[src_idx as usize];
+                    }
+                    // Otherwise remains 0 (zero-padding)
+                }
+
+                let chunk_result = self.convolve_chunk(&chunk);
                 (chunk_idx, chunk_result)
             })
             .collect();
 
-        // Combine results with overlap-add
+        // Combine results: take only valid samples from each chunk
         let mut output = vec![0.0; output_len];
 
         for (chunk_idx, chunk_result) in chunk_results {
-            let output_start = chunk_idx * self.valid_size;
-            for (i, &val) in chunk_result.iter().enumerate() {
+            // Overlap-save: discard first `overlap` samples, keep `valid_size`
+            let output_start = chunk_idx * valid_size;
+            for i in 0..valid_size {
                 let out_idx = output_start + i;
                 if out_idx < output_len {
-                    output[out_idx] += val;
+                    output[out_idx] = chunk_result[overlap + i];
                 }
             }
         }

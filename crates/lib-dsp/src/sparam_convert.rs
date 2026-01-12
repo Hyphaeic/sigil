@@ -224,16 +224,21 @@ pub fn sparam_to_impulse(
 
 /// Convert impulse response to pulse response.
 ///
-/// Integrates the impulse to get step response, then convolves with
-/// a rectangular pulse of duration `bit_time`.
+/// Integrates the impulse to get step response, then computes pulse as
+/// the difference between step and delayed step (equivalent to convolving
+/// with a rectangular pulse of duration `bit_time`).
+///
+/// The impulse response is assumed to be normalized per-sample (discrete-time),
+/// not scaled by the sample interval.
 pub fn impulse_to_pulse(impulse: &Waveform, bit_time: Seconds) -> Waveform {
     let samples_per_bit = (bit_time.0 / impulse.dt.0).round() as usize;
 
-    // Integrate impulse to get step response
+    // Integrate impulse to get step response (cumulative sum)
+    // Note: we don't scale by dt since impulse is in per-sample units
     let mut step: Vec<f64> = Vec::with_capacity(impulse.samples.len());
     let mut cumsum = 0.0;
     for &sample in &impulse.samples {
-        cumsum += sample * impulse.dt.0;
+        cumsum += sample;
         step.push(cumsum);
     }
 

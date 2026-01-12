@@ -324,9 +324,12 @@ impl StatisticalEyeAnalyzer {
 
             let total_isi = pre_isi + post_isi;
 
-            // Worst-case high/low with ISI
-            eye.high[phase] = main + total_isi;
-            eye.low[phase] = main - total_isi;
+            // Worst-case high/low for NRZ ±1 signaling
+            // High rail: worst '1' = main cursor minus ISI penalty
+            // Low rail: worst '0' = negative of main cursor plus ISI penalty
+            // Eye height = high - low = (main - ISI) - (-main + ISI) = 2*(main - ISI)
+            eye.high[phase] = main - total_isi;
+            eye.low[phase] = -(main - total_isi);
         }
 
         eye
