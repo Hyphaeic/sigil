@@ -26,7 +26,7 @@ SI-Kernel is an open-source Rust implementation of a signal integrity simulation
 | AMI Parser | Scaffold | S-expression parser implemented |
 | Touchstone Parser | Scaffold | Basic 2-port support |
 | AMI FFI | Scaffold | Lifecycle management, untested with real models |
-| DSP Engine | **Partial** | Passivity, causality, windowing, DFE-aware eye analysis fixed; convolution/PRBS need work |
+| DSP Engine | **Functional** | Core algorithms working: convolution, PRBS, FFT, eye analysis, passivity, causality |
 | CLI | Scaffold | Basic structure only |
 
 ### Recent Fixes
@@ -45,11 +45,11 @@ The following critical issues have been addressed per IEEE P370-2020 and IBIS 7.
 
 ### Known Limitations
 
-- **Some DSP algorithms are stubs**: The convolution engine, PRBS generator, and eye diagram code are placeholder implementations that need work
 - **No real-world validation**: The code has not been tested against actual IBIS-AMI models or validated against commercial tools
 - **Performance not optimized**: No SIMD, no GPU acceleration, naive algorithm implementations
 - **Limited file format support**: Only basic Touchstone 1.0 and simple IBIS files
 - **No PAM4 support**: Gen 6 PAM4 modulation is not yet implemented
+- **IBIS parser incomplete**: Some test fixtures missing, parser needs validation
 
 ## Building
 
@@ -63,7 +63,7 @@ cargo build --release
 cargo test
 ```
 
-Note: Several DSP tests currently fail due to incomplete algorithm implementations.
+Note: Some IBIS parser tests fail due to missing test fixture files.
 
 ## Project Structure
 
@@ -83,8 +83,8 @@ si-kernel/
 
 ### Critical (Required for Basic Functionality)
 
-- [ ] Implement correct overlap-save convolution algorithm
-- [ ] Fix PRBS generator polynomial implementation
+- [x] ~~Implement correct overlap-save convolution algorithm~~ (Fixed: proper overlap-save with wraparound discard)
+- [x] ~~Fix PRBS generator polynomial implementation~~ (Fixed: reciprocal polynomials for right-shift LFSR)
 - [x] ~~Complete causality enforcement via minimum-phase reconstruction~~ (Fixed: CRIT-DSP-002)
 - [x] ~~Implement proper passivity enforcement with eigenvalue scaling~~ (Fixed: CRIT-DSP-001, uses SVD)
 - [ ] Validate AMI FFI against real vendor models
