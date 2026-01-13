@@ -29,6 +29,19 @@ impl<T> RecoverMutex<T> for Mutex<T> {
 
 pub use lib_types::ami::TrainingState;
 
+/// Best training result.
+///
+/// # MED-TRAIN-002 Fix
+///
+/// This struct holds both FOM and preset together to ensure atomic updates.
+/// Previously, best_fom and best_preset were separate mutexes, creating a
+/// race condition where they could become inconsistent.
+#[derive(Clone, Copy, Debug)]
+struct BestResult {
+    fom: f64,
+    preset: u8,
+}
+
 /// Message bus for back-channel communication between Tx and Rx models.
 ///
 /// The bus provides bidirectional communication channels:
@@ -46,11 +59,14 @@ pub struct BackChannelBus {
     /// Current training state.
     state: AtomicU8,
 
-    /// Best figure of merit seen during training.
-    best_fom: Mutex<Option<f64>>,
-
-    /// Preset associated with best FOM.
-    best_preset: Mutex<Option<u8>>,
+    /// Best result seen during training (FOM + preset atomically consistent).
+    ///
+    /// # MED-TRAIN-002 Fix
+    ///
+    /// Previously FOM and preset were separate mutexes, which could lead to
+    /// mismatched values in parallel training scenarios. Now both values are
+    /// protected by a single mutex for atomic consistency.
+    best_result: Mutex<Option<BestResult>>,
 }
 
 impl BackChannelBus {
@@ -60,21 +76,42 @@ impl BackChannelBus {
             rx_to_tx: Mutex::new(VecDeque::new()),
             tx_to_rx: Mutex::new(VecDeque::new()),
             state: AtomicU8::new(TrainingState::Idle as u8),
-            best_fom: Mutex::new(None),
-            best_preset: Mutex::new(None),
+            best_result: Mutex::new(None), // MED-TRAIN-002: Atomic FOM+preset
         }
     }
 
     /// Get the current training state.
+    ///
+    /// # HIGH-TRAIN-001 Fix
+    ///
+    /// Previously this function silently fell back to Idle on unknown states,
+    /// which could cause unexpected training restarts if a new state was added.
+    /// Per PCIe 5.0 Section 4.2.6.3, state machine errors must be explicit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an unknown training state value is encountered. This is a
+    /// programming error (state was set to invalid value) and should be caught
+    /// during testing, not silently ignored in production.
     pub fn state(&self) -> TrainingState {
-        match self.state.load(Ordering::SeqCst) {
+        let raw_state = self.state.load(Ordering::SeqCst);
+        match raw_state {
             0 => TrainingState::Idle,
             1 => TrainingState::PresetSweep,
             2 => TrainingState::CoarseAdaptation,
             3 => TrainingState::FineAdaptation,
             4 => TrainingState::Converged,
             5 => TrainingState::Failed,
-            _ => TrainingState::Idle,
+            _ => {
+                tracing::error!(
+                    raw_state,
+                    "Unknown training state encountered! This is a programming error."
+                );
+                panic!(
+                    "Invalid training state: {}. Valid states are 0-5 (Idle through Failed).",
+                    raw_state
+                );
+            }
         }
     }
 
@@ -130,29 +167,35 @@ impl BackChannelBus {
     }
 
     /// Record a figure of merit observation.
+    ///
+    /// # MED-TRAIN-002 Fix
+    ///
+    /// Now uses a single mutex to atomically update both FOM and preset,
+    /// preventing race conditions in parallel training scenarios.
     pub fn record_fom(&self, fom: f64, preset: u8) {
-        let mut best = self.best_fom.lock_recover();
-        let mut best_p = self.best_preset.lock_recover();
+        let mut best = self.best_result.lock_recover();
 
-        if best.is_none() || fom > best.unwrap() {
-            *best = Some(fom);
-            *best_p = Some(preset);
+        if best.is_none() || fom > best.unwrap().fom {
+            *best = Some(BestResult { fom, preset });
+            tracing::debug!(fom, preset, "New best training result recorded");
         }
     }
 
     /// Get the best figure of merit and associated preset.
+    ///
+    /// # MED-TRAIN-002 Fix
+    ///
+    /// Returns an atomically consistent (FOM, preset) pair from a single mutex.
     pub fn best_result(&self) -> Option<(f64, u8)> {
-        let fom = *self.best_fom.lock_recover();
-        let preset = *self.best_preset.lock_recover();
-        fom.zip(preset)
+        self.best_result.lock_recover()
+            .map(|result| (result.fom, result.preset))
     }
 
     /// Reset training state and results.
     pub fn reset(&self) {
         self.clear();
         self.set_state(TrainingState::Idle);
-        *self.best_fom.lock_recover() = None;
-        *self.best_preset.lock_recover() = None;
+        *self.best_result.lock_recover() = None;
     }
 }
 

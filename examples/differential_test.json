@@ -1,0 +1,25 @@
+{
+    "name": "Differential Channel Test (4-port)",
+    "pcie_gen": "gen5",
+    "channel": {
+        "touchstone": "test_channel_4port.s4p",
+        "mode": {
+            "type": "differential",
+            "input_p": 1,
+            "input_n": 3,
+            "output_p": 2,
+            "output_n": 4
+        }
+    },
+    "simulation": {
+        "mode": "statistical",
+        "num_bits": 100000,
+        "prbs_order": 31,
+        "samples_per_ui": 64
+    },
+    "output": {
+        "eye_diagram": true,
+        "pulse_response": true,
+        "waveforms": false
+    }
+}

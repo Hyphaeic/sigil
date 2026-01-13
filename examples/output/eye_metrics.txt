@@ -1,0 +1,7 @@
+Eye Diagram Metrics
+===================
+Eye Height:     -0.000000
+Eye Width (UI): 0.2656
+Jitter RMS:     0.000000
+SNR:            0.00 dB
+UI Count:       0

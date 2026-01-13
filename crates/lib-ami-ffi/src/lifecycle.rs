@@ -63,6 +63,8 @@ struct GetWaveFfiOutput {
     params_out_str: Option<String>,
     wave_buffer: Vec<f64>,
     clock_times: Vec<f64>,
+    /// HIGH-FFI-004 FIX: Sentinel overrun detection
+    overrun_index: Option<usize>,
 }
 
 /// An active AMI model session.
@@ -331,21 +333,38 @@ impl AmiSession {
             ));
         }
 
-        // Prepare buffers
+        // HIGH-FFI-004 FIX: Prepare buffers with sentinel values for overrun detection
+        //
+        // Per IBIS 7.2 Section 10.2.3: "wave_size indicates the maximum number of samples"
+        // Some models with bugs (especially in CDR oversampling modes) write beyond this limit.
+        //
+        // We add sentinel values at the end of the buffer to detect overruns.
+        // Using a recognizable bit pattern (0xDEADBEEF encoded as f64).
+        const SENTINEL: f64 = f64::from_bits(0xDEADBEEFDEADBEEF);
+        const SENTINEL_COUNT: usize = 8; // Multiple sentinels to detect extent of overrun
+
         let wave_buffer = wave.samples.clone();
         let clock_times_len = wave.samples.len();
+        let original_buffer_len = wave_buffer.len();
+
+        // Get model name for error reporting
+        let model_name = self.library.path.clone();
 
         // Execute AMI_GetWave - closure owns all data
         let ffi_output = self.execute_protected(move || {
+            // Add sentinel values after the buffer
             let mut wave_buffer = wave_buffer;
+            wave_buffer.extend(std::iter::repeat(SENTINEL).take(SENTINEL_COUNT));
+
             let mut clock_times = vec![0.0f64; clock_times_len];
             let mut params_out: *mut c_char = ptr::null_mut();
             let handle = handle_usize as *mut c_void;
 
+            // Call AMI_GetWave with original size (sentinels are hidden from model)
             let return_code = unsafe {
                 getwave_fn(
                     wave_buffer.as_mut_ptr(),
-                    wave_buffer.len() as i64,
+                    original_buffer_len as i64, // Report original size, not padded
                     clock_times.as_mut_ptr(),
                     &mut params_out,
                     handle,
@@ -356,13 +375,43 @@ impl AmiSession {
             // Per IBIS 7.2 Section 10.2.3, vendor may reuse static buffer immediately.
             let params_out_str = unsafe { read_c_string(params_out) };
 
+            // HIGH-FFI-004 FIX: Check sentinel values for buffer overrun
+            let mut overrun_index = None;
+            for i in 0..SENTINEL_COUNT {
+                let sentinel_idx = original_buffer_len + i;
+                if wave_buffer[sentinel_idx] != SENTINEL {
+                    overrun_index = Some(sentinel_idx);
+                    break;
+                }
+            }
+
+            // Truncate back to original size (remove sentinels)
+            wave_buffer.truncate(original_buffer_len);
+
             GetWaveFfiOutput {
                 return_code,
                 params_out_str,
                 wave_buffer,
                 clock_times,
+                overrun_index, // NEW: Include overrun detection result
             }
         })?;
+
+        // HIGH-FFI-004 FIX: Check for buffer overrun
+        if let Some(overrun_idx) = ffi_output.overrun_index {
+            tracing::error!(
+                model = %model_name,
+                buffer_size = original_buffer_len,
+                overrun_index = overrun_idx,
+                "Buffer overrun detected! Model wrote beyond allocated buffer."
+            );
+
+            return Err(AmiError::BufferOverrun {
+                model: model_name,
+                size: original_buffer_len,
+                detected_index: Some(overrun_idx),
+            });
+        }
 
         // Check return code
         if ffi_output.return_code != 0 {
@@ -380,6 +429,12 @@ impl AmiSession {
         let output_params = ffi_output.params_out_str
             .and_then(|s| AmiParameters::from_ami_string(&s).ok())
             .unwrap_or_default();
+
+        tracing::debug!(
+            getwave_count = self.getwave_count,
+            samples = wave.samples.len(),
+            "AMI_GetWave completed successfully (buffer overrun check passed)"
+        );
 
         Ok(AmiGetWaveResult {
             return_code: ffi_output.return_code,

@@ -283,28 +283,48 @@ fn infer_ports_from_data(data_lines: &[Vec<f64>]) -> Result<usize, ParseError> {
     // Try to determine port count from total values
     // We need total_values to be a multiple of (1 + 2*N²)
 
-    for num_ports in [1, 2, 3, 4, 6, 8] {
+    let first_line_len = data_lines[0].len();
+
+    // For 1-port and 2-port, prioritize based on first line structure
+    // 1-port: 3 values per line (freq, S11_re, S11_im)
+    // 2-port: 9 values per line (freq, S11, S21, S12, S22 - each 2 values)
+
+    // Check exact matches first to avoid ambiguity
+    if first_line_len == 9 {
+        // Definitely 2-port (all data on one line)
+        let values_per_freq = 1 + 2 * 2 * 2; // = 9
+        if total_values % values_per_freq == 0 {
+            return Ok(2);
+        }
+    }
+
+    if first_line_len == 3 {
+        // Definitely 1-port
+        let values_per_freq = 1 + 2 * 1 * 1; // = 3
+        if total_values % values_per_freq == 0 {
+            return Ok(1);
+        }
+    }
+
+    // For multi-line formats or larger ports, check modulo
+    for num_ports in [2, 3, 4, 6, 8, 1] {  // Check 2-port before 1-port to prefer larger
         let values_per_freq = 1 + 2 * num_ports * num_ports;
         if total_values % values_per_freq == 0 && total_values >= values_per_freq {
-            // Verify by checking first line makes sense
-            let first_line_len = data_lines[0].len();
-
-            // For 1-port and 2-port, all data usually fits on one line
-            if num_ports == 1 && first_line_len >= 3 {
-                return Ok(1);
+            // For larger ports (3+), data typically spans multiple lines
+            if num_ports >= 3 {
+                return Ok(num_ports);
             }
+            // For 1-port and 2-port multi-line formats
             if num_ports == 2 && first_line_len >= 5 {
                 return Ok(2);
             }
-            // For larger ports, data spans multiple lines
-            if num_ports >= 3 {
-                return Ok(num_ports);
+            if num_ports == 1 && first_line_len >= 3 {
+                return Ok(1);
             }
         }
     }
 
     // If we can't determine, check first line as fallback
-    let first_line_len = data_lines[0].len();
     match first_line_len {
         3 => Ok(1),
         9 => Ok(2),

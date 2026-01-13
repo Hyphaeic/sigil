@@ -41,3 +41,8 @@ docs/ISSUES.md
 docs/fdrs.md
 docs/Track 13_Modeling & Analysis of Interconnects_Distributed-Physical-Based_Transmission-Line Model_of_PCIe5 _He_V3.pdf
 docs/PHASE1_COMPLETE.md
+docs/TRACK_C_COMPLETE.md
+.gitignore
+docs/TRACK_B_COMPLETE.md
+docs/fdrs_integration_plan.md
+docs/contextalignment.md

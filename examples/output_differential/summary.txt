@@ -1,0 +1,8 @@
+SI-Kernel Simulation Summary
+============================
+
+Results:
+  Eye Height: -0.0000
+  Eye Width:  0.27 UI
+
+Status: FAIL - Eye is closed or marginal

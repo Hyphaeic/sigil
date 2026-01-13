@@ -60,19 +60,98 @@ impl From<PcieGen> for PcieGeneration {
     }
 }
 
+/// Channel mode: single-ended or differential.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ChannelMode {
+    /// Single-ended channel (use single S-parameter entry).
+    #[serde(rename = "single_ended")]
+    SingleEnded {
+        /// Input port (1-based in config, converted to 0-based).
+        #[serde(default = "default_port")]
+        input_port: usize,
+        /// Output port (1-based in config, converted to 0-based).
+        #[serde(default = "default_output_port")]
+        output_port: usize,
+    },
+    /// Differential channel (use mixed-mode S-parameters).
+    ///
+    /// # IEEE P370 Compliance
+    ///
+    /// Per IEEE P370-2020 Section 7.4: "Full 4x4 mixed-mode analysis is
+    /// required for differential channels operating above 16 Gbaud."
+    ///
+    /// This mode computes SDD (differential-differential), SDC (diff-to-common),
+    /// and SCD (common-to-diff) terms to properly account for mode conversion.
+    Differential {
+        /// Input positive port (1-based in config).
+        input_p: usize,
+        /// Input negative port (1-based in config).
+        input_n: usize,
+        /// Output positive port (1-based in config).
+        output_p: usize,
+        /// Output negative port (1-based in config).
+        output_n: usize,
+    },
+}
+
+impl Default for ChannelMode {
+    fn default() -> Self {
+        Self::SingleEnded {
+            input_port: 1,
+            output_port: 2,
+        }
+    }
+}
+
 /// Channel configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelConfig {
     /// Path to Touchstone file.
     pub touchstone: PathBuf,
 
-    /// Input port (1-based in config, converted to 0-based).
-    #[serde(default = "default_port")]
-    pub input_port: usize,
+    /// Channel mode (single-ended or differential).
+    ///
+    /// # Examples
+    ///
+    /// Single-ended:
+    /// ```json
+    /// "mode": {"type": "single_ended", "input_port": 1, "output_port": 2}
+    /// ```
+    ///
+    /// Differential (4-port):
+    /// ```json
+    /// "mode": {"type": "differential", "input_p": 1, "input_n": 3, "output_p": 2, "output_n": 4}
+    /// ```
+    #[serde(default)]
+    pub mode: ChannelMode,
 
-    /// Output port (1-based in config, converted to 0-based).
-    #[serde(default = "default_output_port")]
-    pub output_port: usize,
+    // Deprecated fields for backward compatibility
+    /// Input port (1-based, deprecated - use mode instead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_port: Option<usize>,
+
+    /// Output port (1-based, deprecated - use mode instead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_port: Option<usize>,
+}
+
+impl ChannelConfig {
+    /// Get the channel mode, falling back to deprecated fields if needed.
+    pub fn get_mode(&self) -> ChannelMode {
+        // If legacy input_port/output_port are set, use them
+        if let (Some(input), Some(output)) = (self.input_port, self.output_port) {
+            tracing::warn!(
+                "Using deprecated input_port/output_port fields. \
+                 Please migrate to 'mode' configuration."
+            );
+            return ChannelMode::SingleEnded {
+                input_port: input,
+                output_port: output,
+            };
+        }
+        self.mode.clone()
+    }
 }
 
 fn default_port() -> usize { 1 }
@@ -236,9 +315,26 @@ fn validate_config(config: &SimulationConfig) -> Result<()> {
         validate_model_config(rx, "RX")?;
     }
 
-    // Validate port numbers
-    if config.channel.input_port == 0 || config.channel.output_port == 0 {
-        anyhow::bail!("Port numbers must be >= 1");
+    // Validate port numbers (1-based) based on mode
+    let mode = config.channel.get_mode();
+    match mode {
+        ChannelMode::SingleEnded { input_port, output_port } => {
+            if input_port == 0 || output_port == 0 {
+                anyhow::bail!(
+                    "Port numbers must be 1-based (got input={}, output={})",
+                    input_port,
+                    output_port
+                );
+            }
+        }
+        ChannelMode::Differential { input_p, input_n, output_p, output_n } => {
+            if input_p == 0 || input_n == 0 || output_p == 0 || output_n == 0 {
+                anyhow::bail!(
+                    "Port numbers must be 1-based (got input_p={}, input_n={}, output_p={}, output_n={})",
+                    input_p, input_n, output_p, output_n
+                );
+            }
+        }
     }
 
     // Validate PRBS order

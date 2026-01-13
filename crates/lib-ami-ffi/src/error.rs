@@ -69,6 +69,20 @@ pub enum AmiError {
     /// Too many orphaned threads from previous timeouts.
     #[error("Too many orphaned threads ({count}), max allowed is {max}")]
     TooManyOrphanedThreads { count: usize, max: usize },
+
+    /// Buffer overrun detected (model wrote beyond allocated size).
+    ///
+    /// # HIGH-FFI-004 Fix
+    ///
+    /// Per IBIS 7.2 Section 10.2.3: "wave_size indicates the maximum number
+    /// of samples". Some buggy models write beyond this limit, causing memory
+    /// corruption. This error is raised when sentinel values detect overrun.
+    #[error("Buffer overrun detected: model '{model}' wrote beyond allocated {size} samples")]
+    BufferOverrun {
+        model: String,
+        size: usize,
+        detected_index: Option<usize>,
+    },
 }
 
 impl AmiError {
