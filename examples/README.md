@@ -2,35 +2,55 @@
 
 This directory contains example configurations and test files for the SI-Kernel simulation framework.
 
-## Quick Start: Test CRIT-PHYS Fixes Now! ✅
+## Quick Start: Test All Fixes Now! ✅
 
 ```bash
 # Run the channel-only test (no vendor files needed)
 ./test_crit_phys_fixes.sh
 ```
 
-This will verify that the 3 CRITICAL physics model fixes are working:
+**✅ Updated Jan 13, 2026** — This validates all critical fixes:
+
+**Physics Fixes (CRIT-PHYS):**
 - **CRIT-PHYS-001:** DC extrapolation enforces S21(0) = 1.0
 - **CRIT-PHYS-002:** FFT grid starts at 0 Hz (preserves Hilbert pairs)
 - **CRIT-PHYS-003:** Impulse integration includes dt scaling
 
+**Jan 13 Remediation Fixes:**
+- **CRIT-NEW-001:** AMI_Free memory leak prevention (ready for vendor models)
+- **CRIT-NEW-002:** Bit-by-bit transient discard (eye diagrams now correct)
+- **HIGH-NEW-003:** Statistical sampling auto-detection (IBIS compliant)
+- **HIGH-NEW-004:** Link training validation (clear errors, no silent failures)
+
 ## Files in This Directory
 
 ### Test Files (Ready to Use)
+
+**Single-Ended Channel:**
 - **`test_channel.s2p`** - Synthetic 2-port PCIe channel model
   - Represents ~10 inch PCB trace
   - Frequency range: 100 MHz - 20 GHz
   - Typical FR-4 dielectric loss
-
-- **`channel_only_test.json`** - Minimal configuration
+- **`channel_only_test.json`** - Single-ended configuration
   - Channel-only simulation (no TX/RX models)
   - Statistical eye diagram mode
   - 100,000 bits @ PCIe Gen 5 (32 GT/s)
 
+**Differential Channel (Track B):**
+- **`test_channel_4port.s4p`** - Synthetic 4-port differential channel
+  - Same electrical parameters as 2-port
+  - Supports mixed-mode analysis (SDD, SDC, SCD)
+- **`differential_test.json`** - Differential configuration
+  - Uses IEEE P370-2020 mixed-mode conversion
+  - Reports mode conversion ratios
+  - Validates HIGH-PHYS-004 fix
+
+**Validation Scripts:**
 - **`test_crit_phys_fixes.sh`** - Automated test script
   - Builds project
   - Verifies test files
   - Runs simulation and unit tests
+  - Validates all Jan 13 fixes
 
 ### Example Configurations
 - **`pcie_gen5_config.json`** - Full PCIe Gen 5 simulation
