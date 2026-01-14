@@ -61,6 +61,8 @@ struct GetWaveFfiOutput {
     return_code: i64,
     /// CRIT-FFI-001 FIX: Store as String (copied inside closure), not pointer
     params_out_str: Option<String>,
+    /// CRIT-NEW-001 FIX: Store raw pointer for AMI_Free (as usize for Send)
+    params_out_ptr: usize,
     wave_buffer: Vec<f64>,
     clock_times: Vec<f64>,
     /// HIGH-FFI-004 FIX: Sentinel overrun detection
@@ -250,6 +252,11 @@ impl AmiSession {
         let message = unsafe { read_c_string(msg) };
         let output_params_str = unsafe { read_c_string(params_out) };
 
+        // CRIT-NEW-001 FIX: Free vendor-allocated strings per IBIS 7.2 §10.2.2
+        // Must call AMI_Free after copying strings to prevent memory leaks
+        self.library.free_vendor_memory(msg);
+        self.library.free_vendor_memory(params_out);
+
         // Check return code
         if ffi_output.return_code != 0 {
             // MED-007 FIX: Cleanup any handle returned by the model even on failure
@@ -375,6 +382,9 @@ impl AmiSession {
             // Per IBIS 7.2 Section 10.2.3, vendor may reuse static buffer immediately.
             let params_out_str = unsafe { read_c_string(params_out) };
 
+            // CRIT-NEW-001 FIX: Store pointer for AMI_Free (convert to usize for Send)
+            let params_out_ptr = params_out as usize;
+
             // HIGH-FFI-004 FIX: Check sentinel values for buffer overrun
             let mut overrun_index = None;
             for i in 0..SENTINEL_COUNT {
@@ -391,11 +401,17 @@ impl AmiSession {
             GetWaveFfiOutput {
                 return_code,
                 params_out_str,
+                params_out_ptr,
                 wave_buffer,
                 clock_times,
                 overrun_index, // NEW: Include overrun detection result
             }
         })?;
+
+        // CRIT-NEW-001 FIX: Free vendor-allocated string per IBIS 7.2 §10.2.3
+        // Must call AMI_Free after copying string to prevent memory leaks
+        let params_out_ptr = ffi_output.params_out_ptr as *mut c_char;
+        self.library.free_vendor_memory(params_out_ptr);
 
         // HIGH-FFI-004 FIX: Check for buffer overrun
         if let Some(overrun_idx) = ffi_output.overrun_index {

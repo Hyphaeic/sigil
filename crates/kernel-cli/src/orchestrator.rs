@@ -33,6 +33,29 @@ impl Orchestrator {
     pub fn run(&self) -> Result<SimulationResults> {
         tracing::info!("Starting simulation: {}", self.config.name);
 
+        // HIGH-NEW-004: Validate link_training configuration
+        if self.config.simulation.link_training {
+            if self.config.tx.is_some() || self.config.rx.is_some() {
+                tracing::error!(
+                    "link_training=true with Tx/Rx models configured, but AMI integration not yet wired to orchestrator"
+                );
+                tracing::error!(
+                    "See HIGH-NEW-004 in CRITICALISSUES.md for implementation status"
+                );
+                tracing::error!(
+                    "Workaround: Set link_training=false for channel-only simulation"
+                );
+                anyhow::bail!(
+                    "Link training requested but not yet implemented. \
+                     Set 'simulation.link_training = false' or remove Tx/Rx model configs."
+                );
+            } else {
+                tracing::warn!(
+                    "link_training=true but no Tx/Rx models configured — ignoring (channel-only mode)"
+                );
+            }
+        }
+
         // Load and process channel
         let (channel_impulse, channel_pulse) = self.load_channel()?;
 
@@ -196,7 +219,28 @@ impl Orchestrator {
     fn run_statistical(&self, channel_pulse: &Waveform) -> Result<SimulationResults> {
         tracing::info!("Running statistical analysis...");
 
-        let analyzer = StatisticalEyeAnalyzer::new(self.config.simulation.samples_per_ui);
+        // HIGH-NEW-003 FIX: Derive samples_per_ui from waveform dt instead of config
+        // Per IBIS 7.2 §11.2, statistical processing must use uniformly spaced UI-aligned
+        // samples that match the actual sample_interval in the waveform.
+        let bit_time = self.config.bit_time();
+        let actual_samples_per_ui = (bit_time.0 / channel_pulse.dt.0).round() as usize;
+
+        let config_samples_per_ui = self.config.simulation.samples_per_ui;
+        if actual_samples_per_ui != config_samples_per_ui {
+            tracing::warn!(
+                "Config samples_per_ui={} conflicts with waveform (actual={}). Using waveform value per IBIS 7.2 §11.2",
+                config_samples_per_ui,
+                actual_samples_per_ui
+            );
+        } else {
+            tracing::debug!(
+                "samples_per_ui={} matches waveform dt={:.3e}s",
+                actual_samples_per_ui,
+                channel_pulse.dt.0
+            );
+        }
+
+        let analyzer = StatisticalEyeAnalyzer::new(actual_samples_per_ui);
         let eye = analyzer.analyze(channel_pulse);
 
         let height = eye.eye_height();
@@ -284,10 +328,17 @@ impl Orchestrator {
 
         tracing::debug!("Generated {} input samples", input_waveform.len());
 
-        // Convolve with channel
-        let output_waveform = conv_engine.convolve_waveform(&input_waveform);
+        // CRIT-NEW-002 FIX: Convolve with channel and discard initial transient
+        // Per IBIS 7.2 §11.3, bit-by-bit eyes must exclude ≥3× impulse warmup
+        // to avoid over-reporting ISI from turn-on transients.
+        let output_waveform = conv_engine.convolve_waveform_steady_state(&input_waveform, true);
 
-        tracing::debug!("Convolution complete: {} output samples", output_waveform.len());
+        let warmup_discarded = conv_engine.warmup_samples();
+        tracing::info!(
+            "Convolution complete: {} output samples (discarded {} warmup samples per IBIS 7.2 §11.3)",
+            output_waveform.len(),
+            warmup_discarded
+        );
 
         // Compute eye diagram
         // MED-006 FIX: Use configurable parameters instead of hard-coded values

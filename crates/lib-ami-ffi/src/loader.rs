@@ -63,6 +63,20 @@ pub type AmiGetWaveFn = unsafe extern "C" fn(
 /// ```
 pub type AmiCloseFn = unsafe extern "C" fn(ami_memory_handle: *mut c_void) -> c_long;
 
+/// Function signature for AMI_Free (optional).
+///
+/// ```c
+/// void AMI_Free(void *ptr);
+/// ```
+///
+/// Per IBIS 7.2 Section 10.2.2/10.2.3, the simulator must call AMI_Free
+/// to release memory allocated by AMI_Init (msg, AMI_parameters_out) and
+/// AMI_GetWave (AMI_parameters_out).
+///
+/// Note: AMI_Free is optional in IBIS 7.2 Section 10.2.1 for backwards
+/// compatibility with legacy models. If not present, memory leaks will occur.
+pub type AmiFreeFn = unsafe extern "C" fn(ptr: *mut c_void);
+
 /// Loaded AMI library with extracted function pointers.
 pub struct AmiLibrary {
     /// The underlying dynamic library handle.
@@ -80,6 +94,15 @@ pub struct AmiLibrary {
 
     /// AMI_Close function pointer.
     ami_close: AmiCloseFn,
+
+    /// AMI_Free function pointer (optional, for memory cleanup).
+    ///
+    /// CRIT-NEW-001 FIX: Per IBIS 7.2 §10.2.2/§10.2.3, the simulator must
+    /// call AMI_Free to release vendor-allocated strings (msg, AMI_parameters_out).
+    ///
+    /// If not present, memory will leak on every Init/GetWave call. This is
+    /// tolerable for legacy models but will cause OOM on long BER runs.
+    ami_free: Option<AmiFreeFn>,
 }
 
 impl AmiLibrary {
@@ -122,9 +145,25 @@ impl AmiLibrary {
                 .map(|s| *s)
         };
 
+        // CRIT-NEW-001 FIX: Try to load AMI_Free (optional per IBIS 7.2 §10.2.1)
+        let ami_free: Option<AmiFreeFn> = unsafe {
+            library
+                .get::<AmiFreeFn>(b"AMI_Free\0")
+                .ok()
+                .map(|s| *s)
+        };
+
+        if ami_free.is_none() {
+            tracing::warn!(
+                path = %path_str,
+                "AMI_Free not found — memory leaks possible (legacy model?)"
+            );
+        }
+
         tracing::info!(
             path = %path_str,
             has_getwave = ami_getwave.is_some(),
+            has_free = ami_free.is_some(),
             "Loaded AMI library"
         );
 
@@ -134,6 +173,7 @@ impl AmiLibrary {
             ami_init,
             ami_getwave,
             ami_close,
+            ami_free,
         }))
     }
 
@@ -155,6 +195,37 @@ impl AmiLibrary {
     /// Get the AMI_Close function pointer.
     pub fn close_fn(&self) -> AmiCloseFn {
         self.ami_close
+    }
+
+    /// Free vendor-allocated memory (CRIT-NEW-001 FIX).
+    ///
+    /// Per IBIS 7.2 §10.2.2/§10.2.3, the simulator must call AMI_Free
+    /// to release strings allocated by AMI_Init and AMI_GetWave.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must be a valid pointer returned by the vendor model
+    /// - Must not be called twice on the same pointer (double-free)
+    /// - If AMI_Free is not available (legacy model), this is a no-op
+    ///   and memory will leak (unavoidable for old models)
+    ///
+    /// # Arguments
+    ///
+    /// * `ptr` - Pointer to vendor-allocated memory (typically *mut c_char)
+    pub fn free_vendor_memory(&self, ptr: *mut c_char) {
+        if ptr.is_null() {
+            return;
+        }
+
+        if let Some(ami_free) = self.ami_free {
+            unsafe {
+                ami_free(ptr as *mut c_void);
+            }
+            tracing::trace!("AMI_Free called on vendor string");
+        } else {
+            // Legacy model without AMI_Free — leak is unavoidable
+            tracing::trace!("Skipping AMI_Free (not available in model) — memory leak");
+        }
     }
 }
 
