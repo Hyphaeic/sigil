@@ -59,48 +59,8 @@ sigil is an open-source Rust implementation of a signal integrity simulation ker
 | DSP Engine | **Functional** | All Phase 1 physics fixes complete, resampling, FFT sizing |
 | CLI | **Functional** | Channel-only simulation working, differential mode supported |
 
-### Recent Fixes
 
-**Phase 1 Complete (16 issues)** — All CRITICAL physics and DSP issues resolved per IEEE P370-2020 and IBIS 7.2 standards.
 
-**Tracks B & C Complete (4 additional issues)** — Differential mode and FFI robustness implemented.
-
-| Issue | Description | Status |
-|-------|-------------|--------|
-| CRIT-DSP-001 | **Passivity Enforcement**: SVD-based spectral norm validation per IEEE P370-2020 §4.5.2 | Fixed |
-| CRIT-DSP-002 | **Causality Group Delay**: Minimum-phase reconstruction preserves group delay per IBIS 7.2 §6.4.2 | Fixed |
-| CRIT-PHYS-001 | **DC Extrapolation**: Enforces S21(0)=1.0 for passive transmission lines per IEEE P370 §5.2.3 | Fixed |
-| CRIT-PHYS-002 | **FFT Grid**: Starts at 0 Hz to preserve Hilbert-pair relationship (Kramers-Kronig) | Fixed |
-| CRIT-PHYS-003 | **Impulse Integration**: Includes dt scaling for physics-correct pulse energy | Fixed |
-| HIGH-DSP-003 | **Gibbs Phenomenon**: Kaiser-Bessel windowing per IEEE P370 §5.3.1 | Fixed |
-| HIGH-DSP-004 | **FFT Sizing**: Configurable strategy with bandwidth-aware mode for resonances | Fixed |
-| HIGH-DSP-005 | **Transient Discard**: IBIS 7.2 compliant warmup period methods | Fixed |
-| HIGH-PHYS-002 | **DFE-Aware ISI**: Statistical eye accounts for DFE cancellation per IBIS 7.2 §12.4 | Fixed |
-| HIGH-PHYS-003 | **Mode Conversion**: Full SDC/SCD mixed-mode S-parameter extraction | Fixed |
-| HIGH-PHYS-004 | **Differential Mode**: IEEE P370 compliant mixed-mode analysis for differential channels | Fixed |
-| HIGH-PHYS-006 | **Sampling Alignment**: Automatic dt resampling with Nyquist validation | Fixed |
-| HIGH-PHYS-007 | **FFT Resolution**: Bandwidth-aware sizing captures narrowband resonances | Fixed |
-| HIGH-FFI-003 | **Thread Safety**: AmiSession marked `!Sync` per IBIS 7.2 §10.1 | Fixed |
-| HIGH-FFI-004 | **Buffer Overrun**: Sentinel guard bytes detect vendor model memory corruption | Fixed |
-| HIGH-TRAIN-001 | **Training State**: Explicit validation prevents silent fallback to Idle | Fixed |
-| MED-TRAIN-002 | **FOM Atomicity**: Single mutex prevents race in parallel training | Fixed |
-
-**January 13, 2026 — Critical Remediation (4 additional issues)**
-
-| Issue | Description | Status |
-|-------|-------------|--------|
-| CRIT-NEW-001 | **AMI_Free Memory Leak**: Call AMI_Free after Init/GetWave per IBIS 7.2 §10.2.2/§10.2.3 | **Fixed** |
-| CRIT-NEW-002 | **Bit-by-Bit Transient**: Discard ≥3× impulse warmup before eye analysis per IBIS 7.2 §11.3 | **Fixed** |
-| HIGH-NEW-003 | **Statistical Sampling**: Auto-detect samples_per_ui from waveform dt per IBIS 7.2 §11.2 | **Fixed** |
-| HIGH-NEW-004 | **Link Training Validation**: Clear error when training requested without implementation | **Fixed** |
-
-**Total fixes: 24 issues** (6 CRITICAL + 12 HIGH + 4 MEDIUM + 2 LOW)
-
-**Impact of Jan 13 fixes:**
-- ✅ Long BER runs now work (no more OOM from memory leaks)
-- ✅ Eye diagrams 10-20% larger (correct steady-state, no turn-on transient bias)
-- ✅ Statistical analysis correct (ISI bins properly aligned)
-- ✅ Link training config validated (no silent failures)
 
 ### Known Limitations
 
