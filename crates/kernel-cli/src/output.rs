@@ -95,6 +95,19 @@ pub fn write_results(results: &SimulationResults, output_dir: &Path, format: Out
         );
     }
 
+    // Write channel frequency response (insertion loss curve)
+    if let Some(resp) = &results.channel_response {
+        let resp_path = output_dir.join("channel_response.csv");
+        let mut f = std::fs::File::create(&resp_path)?;
+
+        writeln!(f, "freq_ghz,{}_db", resp.label.to_lowercase())?;
+        for (freq_ghz, db) in &resp.points {
+            writeln!(f, "{},{}", freq_ghz, db)?;
+        }
+
+        tracing::info!("Wrote channel response to {:?}", resp_path);
+    }
+
     // Write summary
     let summary_path = output_dir.join("summary.txt");
     let mut f = std::fs::File::create(&summary_path)?;

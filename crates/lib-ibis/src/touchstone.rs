@@ -57,7 +57,21 @@ impl TouchstoneFile {
 
 /// Parse a Touchstone file from a string.
 pub fn parse_touchstone(content: &str) -> Result<TouchstoneFile, ParseError> {
-    let (remaining, file) = parse_touchstone_inner(content)
+    parse_touchstone_with_ports(content, None)
+}
+
+/// Parse Touchstone content with a known port count.
+///
+/// Prefer this (or [`parse_touchstone_file`], which derives the count from
+/// the `.sNp` extension) over [`parse_touchstone`] whenever the port count
+/// is known: line-shape inference cannot always disambiguate — a wrapped
+/// 4-port file whose rows span lines of 9/8/8/8 values is indistinguishable
+/// from single-line 2-port data when the total happens to divide evenly.
+pub fn parse_touchstone_with_ports(
+    content: &str,
+    ports: Option<usize>,
+) -> Result<TouchstoneFile, ParseError> {
+    let (remaining, file) = parse_touchstone_inner(content, ports)
         .map_err(|e| ParseError::Nom(format!("{:?}", e)))?;
 
     if !remaining.trim().is_empty() {
@@ -71,21 +85,11 @@ pub fn parse_touchstone(content: &str) -> Result<TouchstoneFile, ParseError> {
 pub fn parse_touchstone_file(path: &Path) -> Result<TouchstoneFile, ParseError> {
     let content = std::fs::read_to_string(path)?;
 
-    // Infer number of ports from extension
+    // The .sNp extension is the authoritative port count; data-shape
+    // inference is only a fallback for extension-less content.
     let num_ports = infer_ports_from_extension(path);
 
-    let file = parse_touchstone(&content)?;
-
-    // Verify port count matches extension
-    if let Some(expected) = num_ports {
-        if file.num_ports != expected {
-            tracing::warn!(
-                "Port count mismatch: extension suggests {} ports, file has {}",
-                expected,
-                file.num_ports
-            );
-        }
-    }
+    let file = parse_touchstone_with_ports(&content, num_ports)?;
 
     Ok(file)
 }
@@ -104,17 +108,28 @@ fn infer_ports_from_extension(path: &Path) -> Option<usize> {
 // Nom Parsers (nom 8 compatible)
 // ============================================================================
 
-fn parse_touchstone_inner(input: &str) -> IResult<&str, TouchstoneFile> {
+fn parse_touchstone_inner(
+    input: &str,
+    ports_hint: Option<usize>,
+) -> IResult<&str, TouchstoneFile> {
     let (input, _) = many0(comment_or_blank_line).parse(input)?;
     let (input, options) = parse_options_line(input)?;
-    let (input, _) = many0(comment_or_blank_line).parse(input)?;
-    let (input, data_lines) = many1(parse_data_line).parse(input)?;
+    // Comments and blank lines may appear anywhere inside the data section,
+    // not just before it — VNA/IdEM exports commonly separate every
+    // frequency point with a bare `!` line.
+    let (input, data_lines) =
+        many1(preceded(many0(comment_or_blank_line), parse_data_line)).parse(input)?;
     let (input, _) = many0(comment_or_blank_line).parse(input)?;
 
-    // Determine number of ports from data
-    let num_ports = infer_ports_from_data(&data_lines).map_err(|_| {
-        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-    })?;
+    // The file extension (.sNp) is authoritative when available; line-shape
+    // inference cannot always disambiguate (e.g. a wrapped 4-port file whose
+    // first data line holds 9 values looks exactly like single-line 2-port).
+    let num_ports = match ports_hint {
+        Some(n) => n,
+        None => infer_ports_from_data(&data_lines).map_err(|_| {
+            nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+        })?,
+    };
 
     // Build S-parameters
     let sparams = build_sparams(&options, &data_lines, num_ports).map_err(|_| {
@@ -289,6 +304,18 @@ fn infer_ports_from_data(data_lines: &[Vec<f64>]) -> Result<usize, ParseError> {
     // 1-port: 3 values per line (freq, S11_re, S11_im)
     // 2-port: 9 values per line (freq, S11, S21, S12, S22 - each 2 values)
 
+    // Wrapped 4-port (VNA/IdEM exports): each frequency point spans lines of
+    // 9, 8, 8, 8 values (freq + matrix row 1, then rows 2-4). The first line
+    // alone is indistinguishable from single-line 2-port, so check the
+    // continuation-line signature before the 2-port shortcut.
+    if first_line_len == 9
+        && data_lines.len() >= 4
+        && data_lines[1].len() == 8
+        && total_values % 33 == 0
+    {
+        return Ok(4);
+    }
+
     // Check exact matches first to avoid ambiguity
     if first_line_len == 9 {
         // Definitely 2-port (all data on one line)
@@ -382,15 +409,26 @@ fn build_sparams(
 
         let mut matrix = Array2::zeros((num_ports, num_ports));
 
-        // S-parameters are stored in row-major order
-        let mut param_idx = 0;
-        for row in 0..num_ports {
-            for col in 0..num_ports {
-                let val1 = params[param_idx];
-                let val2 = params[param_idx + 1];
-                param_idx += 2;
+        if num_ports == 2 {
+            // Touchstone 1.0 quirk: 2-port data order is S11 S21 S12 S22
+            // (NOT row-major). Using row-major here silently swapped
+            // S21/S12 — invisible for reciprocal channels, wrong per spec.
+            let order = [(0, 0), (1, 0), (0, 1), (1, 1)];
+            for (i, &(row, col)) in order.iter().enumerate() {
+                matrix[[row, col]] =
+                    options.format.to_complex(params[2 * i], params[2 * i + 1]);
+            }
+        } else {
+            // 1-port and 3+ ports: row-major order per spec.
+            let mut param_idx = 0;
+            for row in 0..num_ports {
+                for col in 0..num_ports {
+                    let val1 = params[param_idx];
+                    let val2 = params[param_idx + 1];
+                    param_idx += 2;
 
-                matrix[[row, col]] = options.format.to_complex(val1, val2);
+                    matrix[[row, col]] = options.format.to_complex(val1, val2);
+                }
             }
         }
 
@@ -419,6 +457,57 @@ mod tests {
 1.0  0.1 0.0  0.9 0.0  0.9 0.0  0.1 0.0
 2.0  0.15 0.05  0.85 -0.1  0.85 -0.1  0.15 0.05
 "#;
+
+    /// Wrapped 4-port export in the style of real VNA/IdEM files from the
+    /// IEEE 802.3ck channel repository: each frequency point spans lines of
+    /// 9/8/8/8 values, points separated by bare `!` comment lines, and the
+    /// sweep starts at DC. Shape inference alone cannot distinguish the
+    /// 9-value first line from single-line 2-port data.
+    const WRAPPED_S4P: &str = r#"! IdEM-style wrapped 4-port export
+# Hz S RI R 50
+!
+0  0.1 0.0  0.9 0.0  0.0 0.0  0.0 0.0
+   0.9 0.0  0.1 0.0  0.0 0.0  0.0 0.0
+   0.0 0.0  0.0 0.0  0.1 0.0  0.9 0.0
+   0.0 0.0  0.0 0.0  0.9 0.0  0.1 0.0
+!
+1000000000  0.12 0.01  0.8 -0.2  0.0 0.0  0.0 0.0
+   0.8 -0.2  0.12 0.01  0.0 0.0  0.0 0.0
+   0.0 0.0  0.0 0.0  0.12 0.01  0.8 -0.2
+   0.0 0.0  0.0 0.0  0.8 -0.2  0.12 0.01
+"#;
+
+    #[test]
+    fn test_parse_wrapped_4port_with_interleaved_comments() {
+        // Extension hint path (authoritative).
+        let hinted = parse_touchstone_with_ports(WRAPPED_S4P, Some(4)).unwrap();
+        assert_eq!(hinted.num_ports, 4);
+        assert_eq!(hinted.sparams.len(), 2);
+
+        // Inference path: 9/8/8/8 continuation signature beats the
+        // "9 values = 2-port" shortcut.
+        let inferred = parse_touchstone(WRAPPED_S4P).unwrap();
+        assert_eq!(inferred.num_ports, 4);
+        assert_eq!(inferred.sparams.len(), 2);
+
+        // DC point preserved; row-major S21 (= matrix[1][0]) is the through.
+        assert_eq!(hinted.sparams.frequencies[0].0, 0.0);
+        let s21 = hinted.sparams.get_parameter(1, 0);
+        assert!((s21[0].re - 0.9).abs() < 1e-12);
+        assert!((s21[1].re - 0.8).abs() < 1e-12 && (s21[1].im + 0.2).abs() < 1e-12);
+    }
+
+    /// Touchstone 1.0 quirk: 2-port column order is S11 S21 S12 S22.
+    /// Asymmetric data distinguishes correct ordering from row-major.
+    #[test]
+    fn test_2port_spec_column_order() {
+        let asym = "! asymmetric 2-port\n# GHz S RI R 50\n1.0  0.1 0.0  0.9 0.0  0.5 0.0  0.2 0.0\n";
+        let ts = parse_touchstone(asym).unwrap();
+        let s21 = ts.sparams.get_parameter(1, 0)[0];
+        let s12 = ts.sparams.get_parameter(0, 1)[0];
+        assert!((s21.re - 0.9).abs() < 1e-12, "second pair is S21 per spec");
+        assert!((s12.re - 0.5).abs() < 1e-12, "third pair is S12 per spec");
+    }
 
     #[test]
     fn test_parse_sample_s2p() {

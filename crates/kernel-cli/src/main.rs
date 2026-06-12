@@ -216,8 +216,7 @@ fn parse_touchstone(file: &Path, to_pulse: bool, bit_time_ps: f64) -> Result<()>
 
     tracing::info!("Parsing Touchstone file: {:?}", file);
 
-    let content = std::fs::read_to_string(file)?;
-    let ts = lib_ibis::parse_touchstone(&content)?;
+    let ts = lib_ibis::parse_touchstone_file(file)?;
 
     println!("Touchstone File");
     println!("  Ports: {}", ts.num_ports);

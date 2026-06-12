@@ -16,6 +16,8 @@ pub mod ami_parser;
 pub mod ibs_parser;
 
 pub use error::ParseError;
-pub use touchstone::{parse_touchstone, TouchstoneFile};
+pub use touchstone::{
+    parse_touchstone, parse_touchstone_file, parse_touchstone_with_ports, TouchstoneFile,
+};
 pub use ami_parser::{parse_ami_file, AmiFile};
 pub use ibs_parser::{parse_ibs_file, IbisFile};

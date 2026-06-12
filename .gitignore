@@ -47,3 +47,11 @@ docs/TRACK_B_COMPLETE.md
 docs/fdrs_integration_plan.md
 docs/contextalignment.md
 docs/OPTION2_FIXES_COMPLETE.md
+
+# Validation data: fetched from the IEEE 802.3ck public channel repository
+# by examples/fetch_802p3ck_channels.sh — not redistributed in this repo
+examples/channels_802p3ck/
+
+# Ad-hoc simulation outputs from the README quick-start
+examples/results/
+examples/output/output_waveform.csv

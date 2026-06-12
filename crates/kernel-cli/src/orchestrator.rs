@@ -7,7 +7,6 @@ use lib_dsp::eye::{EyeAnalyzer, EyeMetrics, StatisticalEyeAnalyzer};
 use lib_dsp::prbs::PrbsGenerator;
 use lib_dsp::sparam_convert::{impulse_to_pulse, sparam_to_impulse, ConversionConfig};
 use lib_dsp::window::WindowConfig;
-use lib_ibis::parse_touchstone;
 use lib_types::units::Seconds;
 use lib_types::waveform::{StatisticalEye, Waveform};
 use std::sync::Arc;
@@ -100,10 +99,10 @@ impl Orchestrator {
     fn load_channel(&self) -> Result<(Waveform, Waveform, ChannelResponse)> {
         tracing::info!("Loading channel from {:?}", self.config.channel.touchstone);
 
-        let content = std::fs::read_to_string(&self.config.channel.touchstone)
-            .context("Failed to read Touchstone file")?;
-
-        let ts = parse_touchstone(&content)
+        // Path-aware parse: the .sNp extension authoritatively sets the
+        // port count (wrapped multi-line 4-port exports are ambiguous to
+        // shape inference).
+        let ts = lib_ibis::parse_touchstone_file(&self.config.channel.touchstone)
             .context("Failed to parse Touchstone file")?;
 
         // HIGH-PHYS-004 FIX: Handle differential vs. single-ended modes
