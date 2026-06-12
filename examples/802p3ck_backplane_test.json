@@ -1,0 +1,27 @@
+{
+  "name": "IEEE 802.3ck measured backplane Bch1 (3.5in) - raw NRZ at 32 GT/s",
+  "pcie_gen": "gen5",
+  "channel": {
+    "touchstone": "channels_802p3ck/kareti_3ck_01_1118_backplane/Bch1_3p5_t.s4p",
+    "mode": {
+      "type": "differential",
+      "input_p": 1,
+      "input_n": 3,
+      "output_p": 2,
+      "output_n": 4
+    }
+  },
+  "tx": null,
+  "rx": null,
+  "simulation": {
+    "mode": "hybrid",
+    "num_bits": 20000,
+    "prbs_order": 31,
+    "samples_per_ui": 64
+  },
+  "output": {
+    "eye_diagram": true,
+    "pulse_response": true,
+    "waveforms": false
+  }
+}
