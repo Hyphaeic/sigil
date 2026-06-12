@@ -47,6 +47,9 @@ toml = "0.8"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# TUI results viewer (kernel-cli only)
+ratatui = "0.29"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

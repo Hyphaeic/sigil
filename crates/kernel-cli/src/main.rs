@@ -5,6 +5,7 @@
 mod config;
 mod orchestrator;
 mod output;
+mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -46,6 +47,11 @@ enum Commands {
         /// Output directory for results
         #[arg(short, long, default_value = "output")]
         output: PathBuf,
+
+        /// Open an interactive TUI viewer after the simulation
+        /// (eye diagrams, pulse response, channel loss)
+        #[arg(long)]
+        tui: bool,
     },
 
     /// Parse and validate an IBIS file
@@ -125,8 +131,8 @@ fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Simulate { config, output } => {
-            run_simulation(&config, &output, cli.format)?;
+        Commands::Simulate { config, output, tui } => {
+            run_simulation(&config, &output, cli.format, tui)?;
         }
         Commands::ParseIbis { file } => {
             parse_ibis(&file)?;
@@ -149,11 +155,11 @@ fn main() -> Result<()> {
 }
 
 // LOW-002 FIX: Use &Path instead of &PathBuf
-fn run_simulation(config_path: &Path, output_dir: &Path, format: OutputFormat) -> Result<()> {
+fn run_simulation(config_path: &Path, output_dir: &Path, format: OutputFormat, tui: bool) -> Result<()> {
     tracing::info!("Loading configuration from {:?}", config_path);
 
     let config = config::load_config(config_path)?;
-    let orchestrator = orchestrator::Orchestrator::new(config)?;
+    let orchestrator = orchestrator::Orchestrator::new(config.clone())?;
 
     tracing::info!("Starting simulation...");
     let results = orchestrator.run()?;
@@ -161,10 +167,16 @@ fn run_simulation(config_path: &Path, output_dir: &Path, format: OutputFormat) -
     // Create output directory
     std::fs::create_dir_all(output_dir)?;
 
-    // Write results
+    // Write results first: the TUI is a viewer, not the source of truth, and
+    // files must exist even if the terminal session is interrupted.
     output::write_results(&results, output_dir, format)?;
 
     tracing::info!("Simulation complete. Results written to {:?}", output_dir);
+
+    if tui {
+        tui::run(&results, &config)?;
+    }
+
     Ok(())
 }
 

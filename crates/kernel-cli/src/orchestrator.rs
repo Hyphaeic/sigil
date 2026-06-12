@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use lib_dsp::convolution::ConvolutionEngine;
 use lib_dsp::eye::{EyeAnalyzer, EyeMetrics, StatisticalEyeAnalyzer};
 use lib_dsp::prbs::PrbsGenerator;
-use lib_dsp::sparam_convert::{sparam_to_impulse, sparam_to_pulse, ConversionConfig};
+use lib_dsp::sparam_convert::{impulse_to_pulse, sparam_to_impulse, ConversionConfig};
 use lib_dsp::window::WindowConfig;
 use lib_ibis::parse_touchstone;
 use lib_types::units::Seconds;
@@ -57,10 +57,10 @@ impl Orchestrator {
         }
 
         // Load and process channel
-        let (channel_impulse, channel_pulse) = self.load_channel()?;
+        let (channel_impulse, channel_pulse, channel_response) = self.load_channel()?;
 
         // Run simulation based on mode
-        let results = match self.config.simulation.mode {
+        let mut results = match self.config.simulation.mode {
             SimulationMode::Statistical => {
                 self.run_statistical(&channel_pulse)?
             }
@@ -73,19 +73,31 @@ impl Orchestrator {
                 SimulationResults {
                     statistical_eye: stat.statistical_eye,
                     eye_metrics: bbb.eye_metrics.or(stat.eye_metrics),
+                    eye_diagram: bbb.eye_diagram,
                     channel_pulse: stat.channel_pulse,
                     output_waveform: bbb.output_waveform,
+                    channel_response: None,
                     training_result: None,
                 }
             }
         };
+
+        // Channel-level data is mode-independent; attach for outputs and the
+        // TUI viewer regardless of which mode produced the eye.
+        if results.channel_pulse.is_none() {
+            results.channel_pulse = Some(channel_pulse);
+        }
+        results.channel_response = Some(channel_response);
 
         tracing::info!("Simulation complete");
         Ok(results)
     }
 
     /// Load and process the channel S-parameters.
-    fn load_channel(&self) -> Result<(Waveform, Waveform)> {
+    ///
+    /// Returns the impulse response, pulse response, and the through-path
+    /// frequency response (insertion loss curve) for reporting/visualization.
+    fn load_channel(&self) -> Result<(Waveform, Waveform, ChannelResponse)> {
         tracing::info!("Loading channel from {:?}", self.config.channel.touchstone);
 
         let content = std::fs::read_to_string(&self.config.channel.touchstone)
@@ -203,8 +215,26 @@ impl Orchestrator {
         let impulse = sparam_to_impulse(&sparams_to_use, &conv_config)
             .context("Failed to compute impulse response")?;
 
-        let pulse = sparam_to_pulse(&sparams_to_use, &conv_config)
-            .context("Failed to compute pulse response")?;
+        // Derive the pulse from the impulse we already computed instead of
+        // calling sparam_to_pulse, which would redo the entire conversion
+        // (passivity, causality, IFFT) and log every warning twice.
+        let pulse = impulse_to_pulse(&impulse, self.config.bit_time());
+
+        // Through-path magnitude vs frequency for reporting/visualization.
+        let label = match channel_mode {
+            crate::config::ChannelMode::SingleEnded { input_port: i, output_port: o } => {
+                format!("S{}{}", o, i)
+            }
+            crate::config::ChannelMode::Differential { .. } => "SDD21".to_string(),
+        };
+        let transfer = sparams_to_use.get_parameter(output_port, input_port);
+        let points: Vec<(f64, f64)> = sparams_to_use
+            .frequencies
+            .iter()
+            .zip(transfer.iter())
+            .map(|(f, s)| (f.0 * 1e-9, 20.0 * s.norm().max(1e-12).log10()))
+            .collect();
+        let channel_response = ChannelResponse { label, points };
 
         tracing::info!(
             "Channel loaded: {} samples, {:.2} ns duration",
@@ -212,36 +242,44 @@ impl Orchestrator {
             pulse.duration().as_ns()
         );
 
-        Ok((impulse, pulse))
+        Ok((impulse, pulse, channel_response))
     }
 
     /// Run statistical simulation.
     fn run_statistical(&self, channel_pulse: &Waveform) -> Result<SimulationResults> {
         tracing::info!("Running statistical analysis...");
 
-        // HIGH-NEW-003 FIX: Derive samples_per_ui from waveform dt instead of config
-        // Per IBIS 7.2 §11.2, statistical processing must use uniformly spaced UI-aligned
-        // samples that match the actual sample_interval in the waveform.
+        // HIGH-NEW-003 FIX (revised with CRIT-NEW-005): Per IBIS 7.2 §11.2,
+        // statistical folding requires uniformly spaced UI-aligned samples.
+        // The pulse from sparam_to_pulse is sampled on the FFT grid, whose dt
+        // generally does not divide the UI — so resample onto the UI grid at
+        // the configured samples_per_ui instead of degrading the analysis to
+        // whatever round(UI/dt) happens to be (previously collapsed to 1
+        // sample/UI, destroying phase resolution).
         let bit_time = self.config.bit_time();
-        let actual_samples_per_ui = (bit_time.0 / channel_pulse.dt.0).round() as usize;
+        let samples_per_ui = self.config.simulation.samples_per_ui;
+        let target_dt = Seconds(bit_time.0 / samples_per_ui as f64);
 
-        let config_samples_per_ui = self.config.simulation.samples_per_ui;
-        if actual_samples_per_ui != config_samples_per_ui {
-            tracing::warn!(
-                "Config samples_per_ui={} conflicts with waveform (actual={}). Using waveform value per IBIS 7.2 §11.2",
-                config_samples_per_ui,
-                actual_samples_per_ui
-            );
-        } else {
+        let pulse_aligned = if lib_dsp::are_compatible_dt(channel_pulse.dt, target_dt, 1e-6) {
             tracing::debug!(
-                "samples_per_ui={} matches waveform dt={:.3e}s",
-                actual_samples_per_ui,
-                channel_pulse.dt.0
+                "Pulse dt={:.3e}s already UI-aligned ({} samples/UI)",
+                channel_pulse.dt.0,
+                samples_per_ui
             );
-        }
+            channel_pulse.clone()
+        } else {
+            tracing::info!(
+                "Resampling pulse for statistical analysis: dt={:.3e}s → {:.3e}s ({} samples/UI) per IBIS 7.2 §11.2",
+                channel_pulse.dt.0,
+                target_dt.0,
+                samples_per_ui
+            );
+            lib_dsp::resample_waveform(channel_pulse, target_dt)
+                .context("Failed to resample pulse response to UI grid")?
+        };
 
-        let analyzer = StatisticalEyeAnalyzer::new(actual_samples_per_ui);
-        let eye = analyzer.analyze(channel_pulse);
+        let analyzer = StatisticalEyeAnalyzer::new(samples_per_ui);
+        let eye = analyzer.analyze(&pulse_aligned);
 
         let height = eye.eye_height();
         let width = eye.eye_width_ui();
@@ -261,8 +299,10 @@ impl Orchestrator {
                 snr: 0.0,
                 ui_count: 0,
             }),
+            eye_diagram: None,
             channel_pulse: Some(channel_pulse.clone()),
             output_waveform: None,
+            channel_response: None,
             training_result: None,
         })
     }
@@ -359,8 +399,10 @@ impl Orchestrator {
         Ok(SimulationResults {
             statistical_eye: None,
             eye_metrics: Some(metrics),
+            eye_diagram: Some(eye_diagram),
             channel_pulse: None,
             output_waveform: Some(output_waveform),
+            channel_response: None,
             training_result: None,
         })
     }
@@ -375,14 +417,30 @@ pub struct SimulationResults {
     /// Eye metrics.
     pub eye_metrics: Option<EyeMetrics>,
 
+    /// Bit-by-bit eye diagram histogram (if computed).
+    pub eye_diagram: Option<lib_types::waveform::EyeDiagram>,
+
     /// Channel pulse response.
     pub channel_pulse: Option<Waveform>,
 
     /// Output waveform (for bit-by-bit).
     pub output_waveform: Option<Waveform>,
 
+    /// Through-path frequency response (insertion loss) of the channel.
+    pub channel_response: Option<ChannelResponse>,
+
     /// Training result (if link training was performed).
     pub training_result: Option<TrainingResult>,
+}
+
+/// Channel through-path frequency response for reporting.
+#[derive(Clone, Debug)]
+pub struct ChannelResponse {
+    /// Which parameter this is (e.g. "S21", "SDD21").
+    pub label: String,
+
+    /// (frequency in GHz, magnitude in dB) points.
+    pub points: Vec<(f64, f64)>,
 }
 
 /// Link training result.
