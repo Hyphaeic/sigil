@@ -4,26 +4,26 @@
 
 > **EXPERIMENTAL SOFTWARE — CHANNEL-ONLY ANALYSIS PRODUCTION-READY**
 >
-> **Status (January 2026):** Core fixes complete (Jan 13). All critical memory leaks and physics errors resolved. Ready for channel validation and vendor AMI model integration.
+> **Status (June 2026):** Amplitude normalization remediation complete; validated against analytic golden channels and measured IEEE 802.3ck backplane/cable data (exact agreement with scikit-rf — see [docs/VALIDATION.md](docs/VALIDATION.md)). Interactive TUI viewer added (`simulate --tui`).
 >
 > **Use for:** Research, algorithm validation, PCB trace analysis, educational purposes
 >
 > **Not for:** Production design decisions without lab validation, safety-critical applications
 >
-> **Issues resolved:** 24/28 (all 6 CRITICAL, 12/14 HIGH severity)
+> **Issues resolved:** 37 total (all CRITICAL; full audit trail in `docs/`)
 >
-> **Test coverage:** 83/84 unit tests pass (98.8%)
+> **Test coverage:** 109/110 unit tests pass (1 known IBIS parser failure)
 >
-> **⚠️ Blockers:** Need real Touchstone files for validation, vendor AMI binaries for link training
+> **⚠️ Blockers:** Vendor AMI binaries for link training (or build open-source [ibisami](https://github.com/capn-freako/ibisami) models)
 
 ## Overview
 
 sigil is an open-source Rust implementation of a signal integrity simulation kernel targeting high-speed serial links, specifically PCIe Gen 5 (32 GT/s NRZ) and Gen 6 (64 GT/s PAM4).
 
-### Current Capabilities (January 2026)
+### Current Capabilities (June 2026)
 
 **✅ Working Now (Channel-Only Analysis):**
-- Touchstone S-parameter parsing (.s2p, .s4p) with automatic format detection
+- Touchstone S-parameter parsing (.s2p, .s4p) including wrapped multi-line VNA/IdEM exports
 - IEEE P370-2020 compliant mixed-mode conversion for differential channels
 - Physics-correct S-parameter to time-domain conversion (DC extrapolation, Kramers-Kronig)
 - Causality enforcement with group delay preservation (IBIS 7.2 §6.4.2)
@@ -31,6 +31,8 @@ sigil is an open-source Rust implementation of a signal integrity simulation ker
 - Overlap-save FFT convolution with Rayon parallelization
 - Statistical and bit-by-bit eye diagram analysis with DFE awareness
 - Automatic sampling alignment and Nyquist validation
+- Interactive TUI results viewer (`simulate --tui`): animated bit-by-bit eye heatmap, statistical eye envelope, pulse response with ISI cursors, insertion loss with Nyquist marker
+- Validated against analytic golden channels and measured IEEE 802.3ck data ([docs/VALIDATION.md](docs/VALIDATION.md))
 
 **🔧 Ready for Testing (Vendor Model Integration):**
 - Loading and executing vendor IBIS-AMI models via FFI (memory leak fixed, ready for real models)
@@ -199,6 +201,13 @@ cargo test
 # Test with provided synthetic channel
 cd examples
 ../target/release/si-kernel simulate --config channel_only_test.json --output results
+
+# Same, with the interactive TUI viewer (q quits, Tab switches views)
+../target/release/si-kernel simulate --config channel_only_test.json --output results --tui
+
+# Real measured IEEE 802.3ck backplane (fetches ~200 MB once, then view in TUI)
+./fetch_802p3ck_channels.sh
+../target/release/si-kernel simulate --config 802p3ck_backplane_test.json --output results_802p3ck --tui
 ```
 
 **What this validates:**
@@ -276,6 +285,8 @@ let impulse = sparam_to_impulse(&sparams, &config)?;
 See comprehensive documentation in `docs/`:
 
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System design, FFI layer, convolution engine, back-channel protocol
+- **[VALIDATION.md](docs/VALIDATION.md)** - Validation against analytic golden channels and measured IEEE 802.3ck data
+- **[AMPLITUDE_FIX_COMPLETE.md](docs/AMPLITUDE_FIX_COMPLETE.md)** - Root-cause analysis of the amplitude normalization remediation
 - **[CRITICALISSUES.md](docs/CRITICALISSUES.md)** - Complete audit of 24 issues with IEEE/IBIS citations (20 fixed)
 - **[IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)** - Multi-phase roadmap with effort estimates
 - **[PHASE1_COMPLETE.md](docs/PHASE1_COMPLETE.md)** - Phase 1 status report (6 CRITICAL issues resolved)
