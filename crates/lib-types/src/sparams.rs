@@ -411,6 +411,10 @@ impl MixedModeSParameters {
     ///
     /// MCR = |SDC21|/|SDD21| or |SCD21|/|SDD21|
     ///
+    /// Returns LINEAR magnitude ratios per frequency point — NOT dB.
+    /// Callers reporting in dB must apply `20*log10(ratio)` themselves;
+    /// a ratio of 0.0 means no mode conversion (−inf dB).
+    ///
     /// A high MCR indicates significant mode conversion, which can hide
     /// insertion loss in differential-only analysis.
     pub fn mode_conversion_ratio(&self) -> Vec<(f64, f64)> {

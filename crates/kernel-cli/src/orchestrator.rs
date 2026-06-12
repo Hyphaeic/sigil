@@ -143,11 +143,18 @@ impl Orchestrator {
                 // Per IEEE P370-2020 Section 7.4
                 let mixed_mode = lib_types::sparams::MixedModeSParameters::from_single_ended(&ts.sparams);
 
-                // Log mode conversion metrics (use mid-band values)
+                // Log mode conversion metrics (use mid-band values).
+                // mode_conversion_ratio() returns LINEAR |SDC21|/|SDD21|
+                // ratios; convert to dB before display and thresholding.
+                // (Previously the linear value was treated as dB, so the
+                // "high mode conversion" warning fired for every
+                // differential channel, including ones with zero coupling.)
                 let mcr_ratios = mixed_mode.mode_conversion_ratio();
                 if !mcr_ratios.is_empty() {
                     let mid_idx = mcr_ratios.len() / 2;
-                    let (sdc_db, scd_db) = mcr_ratios[mid_idx];
+                    let (sdc_lin, scd_lin) = mcr_ratios[mid_idx];
+                    let sdc_db = 20.0 * sdc_lin.max(1e-12).log10();
+                    let scd_db = 20.0 * scd_lin.max(1e-12).log10();
                     tracing::info!(
                         "Mode conversion ratio (mid-band): SDC21={:.2} dB, SCD21={:.2} dB",
                         sdc_db, scd_db

@@ -20,6 +20,8 @@ faer = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+# Golden-channel integration tests parse Touchstone fixtures from examples/
+lib-ibis = { workspace = true }
 
 [[bench]]
 name = "convolution"

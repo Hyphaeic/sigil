@@ -255,10 +255,22 @@ pub fn sparam_to_impulse(
     // Without this, pulse amplitudes come out ~dt (≈1e-11) instead of ~1 V.
     let samples: Vec<f64> = impulse_complex.iter().map(|c| c.re / dt.0).collect();
 
+    if reference_delay != 0.0 {
+        tracing::debug!(
+            "Group delay preserved in-band: impulse peak at ≈{:.3} ns",
+            reference_delay * 1e9
+        );
+    }
+
+    // The propagation delay is carried IN the waveform data: when
+    // preserve_group_delay is set, apply_group_delay() above already shifted
+    // the impulse so its peak lands at t ≈ τ within the sample buffer.
+    // t_start must therefore stay 0 — setting it to the delay as well
+    // double-counted τ (golden ideal-delay fixture peaked at 2τ).
     Ok(Waveform {
         samples,
         dt,
-        t_start: Seconds(reference_delay), // Reflect actual propagation delay
+        t_start: Seconds(0.0),
     })
 }
 
@@ -414,10 +426,26 @@ mod tests {
         sp
     }
 
+    /// Time of the largest-|v| sample on the absolute time axis.
+    fn peak_time(impulse: &Waveform) -> f64 {
+        let argmax = impulse
+            .samples
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().partial_cmp(&b.1.abs()).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+        impulse.t_start.0 + argmax as f64 * impulse.dt.0
+    }
+
     #[test]
-    fn test_impulse_t_start_reflects_propagation_delay() {
-        // CRIT-DSP-002: Verify impulse t_start reflects actual propagation delay
-        // Using 1ns delay to ensure phase changes per step are well below π
+    fn test_impulse_peak_at_propagation_delay() {
+        // CRIT-DSP-002: with preserve_group_delay the impulse PEAK must land
+        // at the propagation delay — counted exactly once. The delay lives in
+        // the waveform data (apply_group_delay phase shift); t_start stays 0.
+        // The previous version of this test asserted t_start ≈ τ while the
+        // data was also shifted by τ, locking in a double-counted delay
+        // (peak at 2τ), caught by the golden ideal-delay fixture.
         let tau = 1e-9; // 1 nanosecond delay
         let sp = create_sparams_with_delay(tau);
 
@@ -429,22 +457,24 @@ mod tests {
 
         let impulse = sparam_to_impulse(&sp, &config).unwrap();
 
-        // t_start should be close to the propagation delay
-        // Allow 50% tolerance due to numerical effects
-        let t_start_ns = impulse.t_start.0 * 1e9;
-        let tau_ns = tau * 1e9;
-
         assert!(
-            t_start_ns > tau_ns * 0.5 && t_start_ns < tau_ns * 1.5,
-            "t_start ({:.2} ns) should be near propagation delay ({:.2} ns)",
-            t_start_ns,
-            tau_ns
+            impulse.t_start.0.abs() < 1e-15,
+            "t_start must be 0 (delay is in-band), got {}",
+            impulse.t_start.0
+        );
+
+        let t_peak_ns = peak_time(&impulse) * 1e9;
+        assert!(
+            t_peak_ns > 0.9 && t_peak_ns < 1.1,
+            "impulse peak at {:.3} ns, expected ≈ 1.0 ns (delay counted once)",
+            t_peak_ns
         );
     }
 
     #[test]
-    fn test_legacy_mode_t_start_zero() {
-        // Verify legacy mode (preserve_group_delay=false) has t_start=0
+    fn test_legacy_mode_discards_delay() {
+        // Legacy mode (preserve_group_delay=false) is minimum-phase only:
+        // the delay is intentionally discarded, so the peak sits near t=0.
         let tau = 1e-9;
         let sp = create_sparams_with_delay(tau);
 
@@ -460,6 +490,11 @@ mod tests {
             impulse.t_start.0.abs() < 1e-15,
             "Legacy mode should have t_start=0, got {}",
             impulse.t_start.0
+        );
+        assert!(
+            peak_time(&impulse) < 0.5 * tau,
+            "legacy minimum-phase peak should be near t=0, got {:.3} ns",
+            peak_time(&impulse) * 1e9
         );
     }
 

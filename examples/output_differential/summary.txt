@@ -2,7 +2,7 @@ SI-Kernel Simulation Summary
 ============================
 
 Results:
-  Eye Height: 0.7157
-  Eye Width:  0.67 UI
+  Eye Height: 0.5790
+  Eye Width:  0.39 UI
 
 Status: PASS - Eye is open

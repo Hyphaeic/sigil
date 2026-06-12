@@ -950,6 +950,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "faer",
+ "lib-ibis",
  "lib-types",
  "ndarray",
  "num-complex",
