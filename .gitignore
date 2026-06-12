@@ -52,6 +52,7 @@ docs/OPTION2_FIXES_COMPLETE.md
 # by examples/fetch_802p3ck_channels.sh — not redistributed in this repo
 examples/channels_802p3ck/
 
-# Ad-hoc simulation outputs from the README quick-start
-examples/results/
+# Ad-hoc simulation outputs from the README quick-start / TUI sessions
+# (committed reference outputs live in examples/output*/ explicitly)
+examples/results*/
 examples/output/output_waveform.csv
