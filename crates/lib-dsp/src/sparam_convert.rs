@@ -114,6 +114,18 @@ fn apply_hermitian_symmetry(spectrum: &mut [Complex64]) {
 }
 
 /// Convert S-parameters to impulse response.
+///
+/// # Units (CRIT-NEW-005 Fix)
+///
+/// The returned waveform is the continuous-time impulse response h(t) sampled
+/// at `dt`, with units of 1/s (V/(V·s)). Its samples are point values of h(t),
+/// so the discrete sum must be scaled by dt to approximate the time integral:
+/// `Σ h[n]·dt ≈ ∫h(t)dt = S21(0)` (≈ 1 for a through channel).
+///
+/// This convention makes the amplitude independent of `num_fft_points` and
+/// safe to resample with value-preserving interpolation. Consumers that
+/// approximate a convolution or integral with a discrete sum must multiply
+/// by dt ([`impulse_to_pulse`] and `ConvolutionEngine::from_waveform` do).
 pub fn sparam_to_impulse(
     sparams: &SParameters,
     config: &ConversionConfig,
@@ -233,11 +245,15 @@ pub fn sparam_to_impulse(
     let mut engine = FftEngine::new();
     let impulse_complex = engine.ifft(&causal)?;
 
-    // Extract real part
-    let samples: Vec<f64> = impulse_complex.iter().map(|c| c.re).collect();
-
     // Compute time step from frequency range
     let dt = Seconds(1.0 / (config.num_fft_points as f64 * df));
+
+    // CRIT-NEW-005 FIX: Scale to continuous-time units of 1/s.
+    // The 1/N-normalized IFFT yields dimensionless values whose plain sum is
+    // S21(0); the inverse Fourier *integral* h(t) = ∫H(f)e^{j2πft}df is
+    // approximated by df·Σ H[k]e^{...} = (N·df)·IFFT[n] = IFFT[n]/dt.
+    // Without this, pulse amplitudes come out ~dt (≈1e-11) instead of ~1 V.
+    let samples: Vec<f64> = impulse_complex.iter().map(|c| c.re / dt.0).collect();
 
     Ok(Waveform {
         samples,
@@ -444,6 +460,61 @@ mod tests {
             impulse.t_start.0.abs() < 1e-15,
             "Legacy mode should have t_start=0, got {}",
             impulse.t_start.0
+        );
+    }
+
+    #[test]
+    fn test_impulse_integral_equals_dc_response() {
+        // CRIT-NEW-005: impulse is continuous-time h(t) in 1/s, so its time
+        // integral Σh[n]·dt must recover the DC response S21(0) ≈ 1.
+        let sp = create_test_sparams();
+        let config = ConversionConfig {
+            num_fft_points: 1024,
+            ..Default::default()
+        };
+
+        let impulse = sparam_to_impulse(&sp, &config).unwrap();
+        let integral: f64 = impulse.samples.iter().sum::<f64>() * impulse.dt.0;
+
+        assert!(
+            (integral - 1.0).abs() < 0.1,
+            "∫h(t)dt should be ≈ S21(0) = 1.0, got {}",
+            integral
+        );
+    }
+
+    #[test]
+    fn test_pulse_amplitude_is_physical() {
+        // CRIT-NEW-005 regression: before the fix, pulse amplitudes came out
+        // ~dt (≈1e-11 V) because the dimensionless IFFT output was integrated
+        // as if it were in 1/s. The peak must be O(1) volt for a low-loss
+        // channel, independent of FFT size.
+        let sp = create_test_sparams();
+
+        let peaks: Vec<f64> = [1024usize, 4096]
+            .iter()
+            .map(|&n| {
+                let config = ConversionConfig {
+                    num_fft_points: n,
+                    ..Default::default()
+                };
+                sparam_to_pulse(&sp, &config).unwrap().max_abs()
+            })
+            .collect();
+
+        for &peak in &peaks {
+            assert!(
+                peak > 0.05 && peak < 1.5,
+                "Pulse peak should be O(1) V for a low-loss channel, got {}",
+                peak
+            );
+        }
+
+        let ratio = peaks[0] / peaks[1];
+        assert!(
+            ratio > 0.9 && ratio < 1.1,
+            "Pulse amplitude must be invariant to FFT size, got peaks {:?}",
+            peaks
         );
     }
 

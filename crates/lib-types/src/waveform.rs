@@ -423,13 +423,20 @@ impl StatisticalEye {
         }
     }
 
-    /// Eye height (minimum opening).
+    /// Eye height at the optimal sampling phase (maximum opening).
+    ///
+    /// The worst-case rails are computed per phase; a receiver samples at the
+    /// phase with the largest opening, so eye height is the maximum of
+    /// (high − low) across phases. Taking the minimum instead (previous
+    /// behavior) always lands in the UI crossing region, which is closed for
+    /// any real channel — it reported every eye as closed regardless of
+    /// margins. A return value of 0.0 means the eye is closed at every phase.
     pub fn eye_height(&self) -> f64 {
         self.high
             .iter()
             .zip(self.low.iter())
             .map(|(h, l)| h - l)
-            .fold(f64::MAX, f64::min)
+            .fold(0.0, f64::max)
     }
 
     /// Eye width in UI (percentage of UI with positive opening).

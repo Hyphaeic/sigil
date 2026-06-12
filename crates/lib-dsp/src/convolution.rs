@@ -82,6 +82,11 @@ pub struct ConvolutionEngine {
     /// Original impulse length.
     impulse_len: usize,
 
+    /// Time step of the impulse waveform, when constructed from a
+    /// continuous-time waveform (`from_waveform*`). None for raw discrete
+    /// taps (`new`/`with_strategy`).
+    impulse_dt: Option<Seconds>,
+
     /// Cached FFT plans.
     fft_forward: Arc<dyn Fft<f64>>,
     fft_inverse: Arc<dyn Fft<f64>>,
@@ -195,6 +200,7 @@ impl ConvolutionEngine {
             overlap,
             valid_size,
             impulse_len,
+            impulse_dt: None,
             fft_forward,
             fft_inverse,
         })
@@ -204,8 +210,11 @@ impl ConvolutionEngine {
     ///
     /// Uses automatic FFT sizing. For custom sizing, use
     /// [`ConvolutionEngine::from_waveform_with_strategy`].
+    ///
+    /// See [`ConvolutionEngine::from_waveform_with_strategy`] for the units
+    /// convention (CRIT-NEW-005).
     pub fn from_waveform(impulse: &Waveform) -> DspResult<Self> {
-        Self::with_strategy(&impulse.samples, impulse.dt, FftSizeStrategy::Auto)
+        Self::from_waveform_with_strategy(impulse, FftSizeStrategy::Auto)
     }
 
     /// Create from a waveform with a custom FFT sizing strategy.
@@ -213,11 +222,27 @@ impl ConvolutionEngine {
     /// # HIGH-DSP-004 and HIGH-PHYS-007 Fix
     ///
     /// Uses the waveform's dt for bandwidth-based FFT sizing.
+    ///
+    /// # Units (CRIT-NEW-005 Fix)
+    ///
+    /// The waveform is treated as a continuous-time impulse response h(t) in
+    /// units of 1/s (as produced by `sparam_to_impulse`). Its samples are
+    /// converted to discrete filter taps h[n]·dt so that the discrete
+    /// convolution Σ x[k]·tap[n−k] approximates the convolution integral
+    /// ∫x(τ)h(t−τ)dτ. This keeps output amplitudes invariant to the sampling
+    /// density (e.g. after `resample_waveform`).
+    ///
+    /// For raw discrete taps (no dt scaling), use [`ConvolutionEngine::new`]
+    /// or [`ConvolutionEngine::with_strategy`].
     pub fn from_waveform_with_strategy(
         impulse: &Waveform,
         strategy: FftSizeStrategy,
     ) -> DspResult<Self> {
-        Self::with_strategy(&impulse.samples, impulse.dt, strategy)
+        // CRIT-NEW-005: continuous h(t) [1/s] → discrete taps h[n]·dt
+        let taps: Vec<f64> = impulse.samples.iter().map(|&v| v * impulse.dt.0).collect();
+        let mut engine = Self::with_strategy(&taps, impulse.dt, strategy)?;
+        engine.impulse_dt = Some(impulse.dt);
+        Ok(engine)
     }
 
     /// Convolve an input signal with the impulse response.
@@ -227,12 +252,13 @@ impl ConvolutionEngine {
         let input_len = input.len();
         let output_len = input_len + self.impulse_len - 1;
 
-        // Determine number of chunks
-        let num_chunks = (input_len + self.valid_size - 1) / self.valid_size;
+        // Number of chunks must cover the full output (including the
+        // convolution tail), not just the input samples.
+        let num_chunks = (output_len + self.valid_size - 1) / self.valid_size;
 
         if num_chunks <= 2 {
             // Small input: process sequentially
-            self.convolve_sequential(input, output_len)
+            self.convolve_sequential(input, output_len, num_chunks)
         } else {
             // Large input: process in parallel
             self.convolve_parallel(input, output_len, num_chunks)
@@ -240,14 +266,20 @@ impl ConvolutionEngine {
     }
 
     /// Sequential convolution for small inputs using overlap-save method.
-    fn convolve_sequential(&self, input: &[f64], output_len: usize) -> Vec<f64> {
+    ///
+    /// Note: an earlier version iterated with `while (input_pos as usize) < ...`
+    /// starting from a negative `input_pos`; the isize→usize cast wrapped and
+    /// the loop never ran, so small inputs (≤2 chunks) silently produced
+    /// all-zero output. This now mirrors the per-chunk indexing of the
+    /// parallel path.
+    fn convolve_sequential(&self, input: &[f64], output_len: usize, num_chunks: usize) -> Vec<f64> {
         let mut output = vec![0.0; output_len];
 
-        let mut chunk_idx = 0;
-        let mut input_pos: isize = -(self.overlap as isize); // Start before input for proper overlap
+        for chunk_idx in 0..num_chunks {
+            // For overlap-save, the chunk starts `overlap` samples before the
+            // first output sample it is responsible for (zero-padded at edges).
+            let input_pos = (chunk_idx * self.valid_size) as isize - self.overlap as isize;
 
-        while (input_pos as usize) < input.len() + self.overlap {
-            // Build input chunk with overlap from previous section
             let mut chunk = vec![0.0; self.fft_size];
             for i in 0..self.fft_size {
                 let src_idx = input_pos + i as isize;
@@ -268,9 +300,6 @@ impl ConvolutionEngine {
                     output[out_idx] = chunk_result[self.overlap + i];
                 }
             }
-
-            input_pos += self.valid_size as isize;
-            chunk_idx += 1;
         }
 
         output
@@ -348,12 +377,36 @@ impl ConvolutionEngine {
     }
 
     /// Convolve a waveform, returning a new waveform.
+    ///
+    /// When the engine was built via `from_waveform*`, the output is the
+    /// sampled convolution integral: volts in, volts out (CRIT-NEW-005).
     pub fn convolve_waveform(&self, input: &Waveform) -> Waveform {
+        self.check_dt_match(input);
         let samples = self.convolve(&input.samples);
         Waveform {
             samples,
             dt: input.dt,
             t_start: input.t_start,
+        }
+    }
+
+    /// Warn if the input waveform's time grid differs from the impulse's.
+    ///
+    /// Convolving signals sampled on different grids is a units error: the
+    /// taps were scaled by the impulse dt, so amplitudes would be off by
+    /// the dt ratio. Callers should resample first (see `resample_waveform`).
+    fn check_dt_match(&self, input: &Waveform) {
+        if let Some(impulse_dt) = self.impulse_dt {
+            let rel_err = (input.dt.0 - impulse_dt.0).abs() / impulse_dt.0.max(f64::MIN_POSITIVE);
+            if rel_err > 1e-6 {
+                tracing::warn!(
+                    "Convolving waveform with dt={:.3e}s against impulse sampled at dt={:.3e}s; \
+                     amplitudes will be scaled by ~{:.3}. Resample the impulse first.",
+                    input.dt.0,
+                    impulse_dt.0,
+                    impulse_dt.0 / input.dt.0
+                );
+            }
         }
     }
 
@@ -433,6 +486,7 @@ impl ConvolutionEngine {
     /// Automatically discards the initial transient, adjusting t_start
     /// to reflect the new starting point.
     pub fn convolve_waveform_steady_state(&self, input: &Waveform, discard_3x: bool) -> Waveform {
+        self.check_dt_match(input);
         let discard = if discard_3x {
             self.warmup_samples()
         } else {
@@ -608,6 +662,77 @@ mod tests {
                 i, s, f
             );
         }
+    }
+
+    #[test]
+    fn test_convolve_small_input_matches_direct() {
+        // Regression: the sequential path (≤2 chunks) used to return all
+        // zeros due to an isize→usize cast in its loop condition. Verify
+        // every output sample, including the convolution tail, against
+        // direct convolution.
+        let kernel = vec![0.5, 0.25, -0.125, 0.0625];
+        let signal: Vec<f64> = (0..50).map(|i| ((i * 7919) % 13) as f64 - 6.0).collect();
+
+        let engine = ConvolutionEngine::new(&kernel).unwrap();
+        let result = engine.convolve(&signal);
+        let direct = direct_convolve(&signal, &kernel);
+
+        assert_eq!(result.len(), direct.len());
+        for (i, (&d, &r)) in direct.iter().zip(result.iter()).enumerate() {
+            assert!((d - r).abs() < 1e-10, "Mismatch at {}: {} vs {}", i, d, r);
+        }
+    }
+
+    #[test]
+    fn test_from_waveform_physical_scaling() {
+        // CRIT-NEW-005: from_waveform treats the waveform as continuous-time
+        // h(t) [1/s] and bakes ×dt into the taps. A unit-area impulse
+        // (h = 1/dt at one sample) must act as an identity filter.
+        let dt = Seconds::from_ps(10.0);
+        let mut h = vec![0.0; 8];
+        h[0] = 1.0 / dt.0;
+        let impulse = Waveform::new(h, dt, Seconds::ZERO);
+
+        let engine = ConvolutionEngine::from_waveform(&impulse).unwrap();
+        let input = Waveform::new(vec![1.0; 100], dt, Seconds::ZERO);
+        let output = engine.convolve_waveform(&input);
+
+        assert!(
+            (output.samples[50] - 1.0).abs() < 1e-9,
+            "Unit-area impulse should pass signal through unchanged, got {}",
+            output.samples[50]
+        );
+    }
+
+    #[test]
+    fn test_from_waveform_dt_invariance() {
+        // CRIT-NEW-005: the same continuous-time impulse sampled at different
+        // rates must produce the same output level. Use a rectangular
+        // unit-area impulse h(t) = 1/T over [0, T) so the Riemann sum is
+        // exact at both sampling rates.
+        let t_width = 200e-12; // 200 ps rectangle
+
+        let steady_state_level = |dt_val: f64| -> f64 {
+            let n_taps = (t_width / dt_val).round() as usize;
+            let h = vec![1.0 / t_width; n_taps];
+            let impulse = Waveform::new(h, Seconds(dt_val), Seconds::ZERO);
+
+            let engine = ConvolutionEngine::from_waveform(&impulse).unwrap();
+            let n_input = n_taps * 10;
+            let input = Waveform::new(vec![1.0; n_input], Seconds(dt_val), Seconds::ZERO);
+            let output = engine.convolve_waveform(&input);
+            output.samples[n_input / 2]
+        };
+
+        let coarse = steady_state_level(10e-12); // 20 taps
+        let fine = steady_state_level(2.5e-12); // 80 taps
+
+        assert!(
+            (coarse - 1.0).abs() < 1e-9 && (fine - 1.0).abs() < 1e-9,
+            "Steady-state must be 1.0 V at any sampling density, got {} and {}",
+            coarse,
+            fine
+        );
     }
 
     #[test]
